@@ -3,6 +3,7 @@ import 'dart:ui';
 import 'package:flutter/foundation.dart';
 
 import '../models/pencil_lead.dart';
+import '../models/pressure_mode.dart';
 import '../models/stroke.dart';
 import '../models/stroke_point.dart';
 import '../models/tool_type.dart';
@@ -78,6 +79,20 @@ class DrawingService extends ChangeNotifier {
     if (_currentOpacity != value) {
       _currentOpacity = value;
       _currentLead = null; // manual override clears lead preset
+      notifyListeners();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pressure mode
+  // ---------------------------------------------------------------------------
+
+  /// How stylus pressure affects pencil rendering.
+  PressureMode _pressureMode = PressureMode.width;
+  PressureMode get pressureMode => _pressureMode;
+  set pressureMode(PressureMode value) {
+    if (_pressureMode != value) {
+      _pressureMode = value;
       notifyListeners();
     }
   }

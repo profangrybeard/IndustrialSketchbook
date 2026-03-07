@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:industrial_sketchbook/models/pencil_lead.dart';
+import 'package:industrial_sketchbook/models/pressure_mode.dart';
 import 'package:industrial_sketchbook/models/stroke.dart';
 import 'package:industrial_sketchbook/models/stroke_point.dart';
 import 'package:industrial_sketchbook/models/tool_type.dart';
@@ -382,6 +383,70 @@ void main() {
         final stroke = service.onPointerUp()!;
 
         expect(stroke.tool, equals(ToolType.eraser));
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // Pressure mode (Phase 2.6)
+    // -----------------------------------------------------------------------
+    group('pressure mode', () {
+      test('defaults to PressureMode.width', () {
+        expect(service.pressureMode, equals(PressureMode.width));
+      });
+
+      test('setter changes pressure mode', () {
+        service.pressureMode = PressureMode.opacity;
+        expect(service.pressureMode, equals(PressureMode.opacity));
+
+        service.pressureMode = PressureMode.both;
+        expect(service.pressureMode, equals(PressureMode.both));
+      });
+
+      test('setting same value does not notify', () {
+        int notifyCount = 0;
+        service.addListener(() => notifyCount++);
+
+        service.pressureMode = PressureMode.width; // same as default
+        expect(notifyCount, equals(0));
+      });
+
+      test('changing pressure mode notifies listeners', () {
+        int notifyCount = 0;
+        service.addListener(() => notifyCount++);
+
+        service.pressureMode = PressureMode.opacity;
+        expect(notifyCount, equals(1));
+
+        service.pressureMode = PressureMode.both;
+        expect(notifyCount, equals(2));
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // PencilLead grainIntensity (Phase 2.6)
+    // -----------------------------------------------------------------------
+    group('pencil lead grain intensity', () {
+      test('each lead has a grain intensity value', () {
+        for (final lead in PencilLead.values) {
+          expect(lead.grainIntensity, greaterThan(0.0),
+              reason: '${lead.label} should have positive grain');
+          expect(lead.grainIntensity, lessThanOrEqualTo(1.0),
+              reason: '${lead.label} grain should be <= 1.0');
+        }
+      });
+
+      test('soft leads have higher grain than hard leads', () {
+        expect(PencilLead.soft.grainIntensity,
+            greaterThan(PencilLead.fine.grainIntensity));
+      });
+
+      test('grain intensity ordering: fine < medium < bold < soft', () {
+        expect(PencilLead.fine.grainIntensity,
+            lessThan(PencilLead.medium.grainIntensity));
+        expect(PencilLead.medium.grainIntensity,
+            lessThan(PencilLead.bold.grainIntensity));
+        expect(PencilLead.bold.grainIntensity,
+            lessThan(PencilLead.soft.grainIntensity));
       });
     });
   });

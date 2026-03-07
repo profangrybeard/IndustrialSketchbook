@@ -1,13 +1,14 @@
 import 'package:flutter/material.dart';
 
+import '../models/grid_style.dart';
 import '../models/pencil_lead.dart';
+import '../models/pressure_mode.dart';
 import '../models/tool_type.dart';
-import 'color_wheel_dialog.dart';
 
 /// Compact floating vertical palette that docks to screen edges.
 ///
-/// Contains tool selection (with pencil leads), color picker, weight slider,
-/// grid toggle, eraser toggle, and clear canvas actions.
+/// Contains tool selection (with pencil leads + pressure mode), inline color
+/// picker, weight slider, grid/paper settings, eraser toggle, and clear canvas.
 class FloatingPalette extends StatefulWidget {
   const FloatingPalette({
     super.key,
@@ -16,15 +17,19 @@ class FloatingPalette extends StatefulWidget {
     required this.currentWeight,
     required this.currentLead,
     required this.eraserToggleActive,
-    required this.gridEnabled,
+    required this.gridStyle,
     required this.gridSpacing,
+    required this.paperColor,
+    required this.pressureMode,
     required this.onToolChanged,
     required this.onColorChanged,
     required this.onWeightChanged,
     required this.onLeadChanged,
     required this.onEraserToggle,
-    required this.onGridToggle,
+    required this.onGridStyleChanged,
     required this.onGridSpacingChanged,
+    required this.onPaperColorChanged,
+    required this.onPressureModeChanged,
     required this.onClear,
   });
 
@@ -33,22 +38,26 @@ class FloatingPalette extends StatefulWidget {
   final double currentWeight;
   final PencilLead? currentLead;
   final bool eraserToggleActive;
-  final bool gridEnabled;
+  final GridStyle gridStyle;
   final double gridSpacing;
+  final Color paperColor;
+  final PressureMode pressureMode;
   final ValueChanged<ToolType> onToolChanged;
   final ValueChanged<int> onColorChanged;
   final ValueChanged<double> onWeightChanged;
   final ValueChanged<PencilLead> onLeadChanged;
   final VoidCallback onEraserToggle;
-  final VoidCallback onGridToggle;
+  final ValueChanged<GridStyle> onGridStyleChanged;
   final ValueChanged<double> onGridSpacingChanged;
+  final ValueChanged<Color> onPaperColorChanged;
+  final ValueChanged<PressureMode> onPressureModeChanged;
   final VoidCallback onClear;
 
   @override
   State<FloatingPalette> createState() => _FloatingPaletteState();
 }
 
-enum _SubPanel { tool, weight, grid }
+enum _SubPanel { tool, color, weight, grid }
 
 class _FloatingPaletteState extends State<FloatingPalette> {
   /// Current position of the palette (top-left corner).
@@ -60,7 +69,32 @@ class _FloatingPaletteState extends State<FloatingPalette> {
   /// Whether the palette is docked to the right edge.
   bool _dockedRight = false;
 
+  /// HSV color state for the inline color picker.
+  late HSVColor _hsv;
+
+  /// Whether HSV has been initialized from the widget prop.
+  bool _hsvInitialized = false;
+
   static const double _stripWidth = 48.0;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!_hsvInitialized) {
+      _hsv = HSVColor.fromColor(Color(widget.currentColor));
+      _hsvInitialized = true;
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant FloatingPalette oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Sync HSV when color changes externally (e.g. from undo or load)
+    if (oldWidget.currentColor != widget.currentColor &&
+        _expandedPanel != _SubPanel.color) {
+      _hsv = HSVColor.fromColor(Color(widget.currentColor));
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -140,13 +174,10 @@ class _FloatingPaletteState extends State<FloatingPalette> {
           ),
           const _PaletteDivider(),
 
-          // Color picker
+          // Color picker (inline sub-panel)
           _ColorSwatch(
             color: Color(widget.currentColor),
-            onTap: () {
-              setState(() => _expandedPanel = null);
-              _showColorPicker();
-            },
+            onTap: () => _togglePanel(_SubPanel.color),
           ),
           const _PaletteDivider(),
 
@@ -159,11 +190,11 @@ class _FloatingPaletteState extends State<FloatingPalette> {
           ),
           const _PaletteDivider(),
 
-          // Grid toggle
+          // Grid / paper settings
           _PaletteIcon(
-            icon: Icons.grid_4x4,
-            tooltip: 'Grid',
-            isActive: widget.gridEnabled,
+            icon: _iconForGridStyle(widget.gridStyle),
+            tooltip: 'Grid & Paper',
+            isActive: widget.gridStyle != GridStyle.none,
             activeColor: Colors.blueAccent,
             onTap: () {
               _togglePanel(_SubPanel.grid);
@@ -217,12 +248,17 @@ class _FloatingPaletteState extends State<FloatingPalette> {
         padding: const EdgeInsets.all(8),
         child: switch (panel) {
           _SubPanel.tool => _buildToolPanel(),
+          _SubPanel.color => _buildColorPanel(),
           _SubPanel.weight => _buildWeightPanel(),
           _SubPanel.grid => _buildGridPanel(),
         },
       ),
     );
   }
+
+  // ---------------------------------------------------------------------------
+  // Tool panel (with pencil leads + pressure mode)
+  // ---------------------------------------------------------------------------
 
   Widget _buildToolPanel() {
     const tools = <(ToolType, IconData, String)>[
@@ -253,7 +289,7 @@ class _FloatingPaletteState extends State<FloatingPalette> {
             },
           ),
 
-        // Pencil leads (shown when pencil is active)
+        // Pencil leads + pressure mode (shown when pencil is active)
         if (widget.currentTool == ToolType.pencil &&
             !widget.eraserToggleActive) ...[
           const Padding(
@@ -281,10 +317,162 @@ class _FloatingPaletteState extends State<FloatingPalette> {
                 widget.onLeadChanged(lead);
               },
             ),
+
+          // Pressure mode selector
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 4),
+            child: Divider(height: 1, color: Colors.white24),
+          ),
+          const Padding(
+            padding: EdgeInsets.only(left: 4, bottom: 4),
+            child: Text(
+              'Pressure',
+              style: TextStyle(
+                color: Colors.white54,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final mode in PressureMode.values)
+                Padding(
+                  padding: const EdgeInsets.only(right: 4),
+                  child: _ModeChip(
+                    label: mode.label,
+                    isActive: widget.pressureMode == mode,
+                    onTap: () => widget.onPressureModeChanged(mode),
+                  ),
+                ),
+            ],
+          ),
         ],
       ],
     );
   }
+
+  // ---------------------------------------------------------------------------
+  // Inline color picker panel
+  // ---------------------------------------------------------------------------
+
+  Widget _buildColorPanel() {
+    final color = _hsv.toColor();
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Color preview swatch
+        Container(
+          height: 30,
+          width: double.infinity,
+          decoration: BoxDecoration(
+            color: color,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: Colors.white24),
+          ),
+        ),
+        const SizedBox(height: 8),
+
+        // Hue slider (colored track)
+        _ColorSliderRow(
+          label: 'H',
+          value: _hsv.hue,
+          min: 0,
+          max: 360,
+          trackColor: HSVColor.fromAHSV(1, _hsv.hue, 1, 1).toColor(),
+          onChanged: (v) {
+            setState(() => _hsv = _hsv.withHue(v));
+            widget.onColorChanged(_hsv.toColor().toARGB32());
+          },
+        ),
+
+        // Saturation slider
+        _ColorSliderRow(
+          label: 'S',
+          value: _hsv.saturation,
+          min: 0,
+          max: 1,
+          trackColor: color,
+          onChanged: (v) {
+            setState(() => _hsv = _hsv.withSaturation(v));
+            widget.onColorChanged(_hsv.toColor().toARGB32());
+          },
+        ),
+
+        // Brightness slider
+        _ColorSliderRow(
+          label: 'B',
+          value: _hsv.value,
+          min: 0,
+          max: 1,
+          trackColor: color,
+          onChanged: (v) {
+            setState(() => _hsv = _hsv.withValue(v));
+            widget.onColorChanged(_hsv.toColor().toARGB32());
+          },
+        ),
+
+        const SizedBox(height: 6),
+
+        // Quick presets (2 rows of 4)
+        _buildQuickColorPresets(),
+      ],
+    );
+  }
+
+  Widget _buildQuickColorPresets() {
+    const presets = <(Color, String)>[
+      (Colors.black, 'Black'),
+      (Colors.white, 'White'),
+      (Color(0xFFE53935), 'Red'),
+      (Color(0xFF1E88E5), 'Blue'),
+      (Color(0xFF43A047), 'Green'),
+      (Color(0xFFFDD835), 'Yellow'),
+      (Color(0xFFFB8C00), 'Orange'),
+      (Color(0xFF8E24AA), 'Purple'),
+    ];
+
+    return Column(
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            for (final preset in presets.take(4))
+              _QuickColorDot(
+                color: preset.$1,
+                tooltip: preset.$2,
+                onTap: () {
+                  setState(() => _hsv = HSVColor.fromColor(preset.$1));
+                  widget.onColorChanged(preset.$1.toARGB32());
+                },
+              ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+          children: [
+            for (final preset in presets.skip(4))
+              _QuickColorDot(
+                color: preset.$1,
+                tooltip: preset.$2,
+                onTap: () {
+                  setState(() => _hsv = HSVColor.fromColor(preset.$1));
+                  widget.onColorChanged(preset.$1.toARGB32());
+                },
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Weight panel
+  // ---------------------------------------------------------------------------
 
   Widget _buildWeightPanel() {
     return Column(
@@ -294,17 +482,14 @@ class _FloatingPaletteState extends State<FloatingPalette> {
           widget.currentWeight.toStringAsFixed(1),
           style: const TextStyle(color: Colors.white, fontSize: 14),
         ),
-        RotatedBox(
-          quarterTurns: 0,
-          child: SizedBox(
-            width: 180,
-            child: Slider(
-              value: widget.currentWeight,
-              min: 0.5,
-              max: 50.0,
-              divisions: 99,
-              onChanged: widget.onWeightChanged,
-            ),
+        SizedBox(
+          width: 180,
+          child: Slider(
+            value: widget.currentWeight,
+            min: 0.5,
+            max: 50.0,
+            divisions: 99,
+            onChanged: widget.onWeightChanged,
           ),
         ),
         // Visual preview of stroke weight
@@ -325,26 +510,46 @@ class _FloatingPaletteState extends State<FloatingPalette> {
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // Grid & paper panel
+  // ---------------------------------------------------------------------------
+
   Widget _buildGridPanel() {
     return Column(
       mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // Grid style selector
+        const Padding(
+          padding: EdgeInsets.only(left: 4, bottom: 4),
+          child: Text(
+            'Grid Style',
+            style: TextStyle(
+              color: Colors.white54,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
         Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text(
-              'Grid',
-              style: TextStyle(color: Colors.white, fontSize: 13),
-            ),
-            const SizedBox(width: 8),
-            Switch(
-              value: widget.gridEnabled,
-              onChanged: (_) => widget.onGridToggle(),
-              activeColor: Colors.blueAccent,
-            ),
+            for (final style in GridStyle.values)
+              Padding(
+                padding: const EdgeInsets.only(right: 4),
+                child: _GridStyleChip(
+                  icon: _iconForGridStyle(style),
+                  label: style.label,
+                  isActive: widget.gridStyle == style,
+                  onTap: () => widget.onGridStyleChanged(style),
+                ),
+              ),
           ],
         ),
-        if (widget.gridEnabled) ...[
+
+        // Spacing slider (only when grid is visible)
+        if (widget.gridStyle != GridStyle.none) ...[
+          const SizedBox(height: 8),
           SizedBox(
             width: 180,
             child: Slider(
@@ -356,31 +561,76 @@ class _FloatingPaletteState extends State<FloatingPalette> {
               onChanged: widget.onGridSpacingChanged,
             ),
           ),
-          Text(
-            '${widget.gridSpacing.round()}px spacing',
-            style: const TextStyle(color: Colors.white54, fontSize: 11),
+          Padding(
+            padding: const EdgeInsets.only(left: 4),
+            child: Text(
+              '${widget.gridSpacing.round()}px spacing',
+              style: const TextStyle(color: Colors.white54, fontSize: 11),
+            ),
           ),
         ],
+
+        // Paper color presets
+        const SizedBox(height: 8),
+        const Divider(height: 1, color: Colors.white24),
+        const SizedBox(height: 8),
+        const Padding(
+          padding: EdgeInsets.only(left: 4, bottom: 6),
+          child: Text(
+            'Paper Color',
+            style: TextStyle(
+              color: Colors.white54,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final (color, label) in _paperColorPresets)
+              Padding(
+                padding: const EdgeInsets.only(right: 6),
+                child: _PaperColorChip(
+                  color: color,
+                  label: label,
+                  isActive: _colorsMatch(widget.paperColor, color),
+                  onTap: () => widget.onPaperColorChanged(color),
+                ),
+              ),
+          ],
+        ),
       ],
     );
+  }
+
+  /// Paper color presets — curated set of common paper colors.
+  static const _paperColorPresets = <(Color, String)>[
+    (Color(0xFFFFFFFF), 'White'),
+    (Color(0xFFF5F5F0), 'Cream'),
+    (Color(0xFFE8E0D0), 'Tan'),
+    (Color(0xFFD0D0D0), 'Gray'),
+    (Color(0xFF2D2D2D), 'Dark'),
+    (Color(0xFF1A1A2E), 'Navy'),
+  ];
+
+  /// Compare two colors ignoring minor floating-point differences.
+  bool _colorsMatch(Color a, Color b) {
+    return a.toARGB32() == b.toARGB32();
+  }
+
+  IconData _iconForGridStyle(GridStyle style) {
+    return switch (style) {
+      GridStyle.none => Icons.crop_free,
+      GridStyle.dots => Icons.grid_4x4,
+      GridStyle.lines => Icons.grid_on,
+    };
   }
 
   void _togglePanel(_SubPanel panel) {
     setState(() {
       _expandedPanel = _expandedPanel == panel ? null : panel;
     });
-  }
-
-  void _showColorPicker() {
-    showDialog(
-      context: context,
-      builder: (ctx) => ColorWheelDialog(
-        initialColor: Color(widget.currentColor),
-        onColorPicked: (color) {
-          widget.onColorChanged(color.toARGB32());
-        },
-      ),
-    );
   }
 
   IconData _iconForTool(ToolType tool) {
@@ -535,6 +785,221 @@ class _ToolRow extends StatelessWidget {
               const Icon(Icons.check, size: 14, color: Colors.white),
             ],
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A compact chip for selecting grid style (None / Dots / Lines).
+class _GridStyleChip extends StatelessWidget {
+  const _GridStyleChip({
+    required this.icon,
+    required this.label,
+    required this.isActive,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final bool isActive;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        decoration: BoxDecoration(
+          color: isActive
+              ? Colors.blueAccent.withValues(alpha: 0.3)
+              : Colors.white.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(6),
+          border: isActive
+              ? Border.all(color: Colors.blueAccent, width: 1)
+              : null,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 18,
+                color: isActive ? Colors.blueAccent : Colors.white70),
+            const SizedBox(height: 2),
+            Text(
+              label,
+              style: TextStyle(
+                color: isActive ? Colors.blueAccent : Colors.white54,
+                fontSize: 9,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A paper color preset chip — circular swatch with selection ring.
+class _PaperColorChip extends StatelessWidget {
+  const _PaperColorChip({
+    required this.color,
+    required this.label,
+    required this.isActive,
+    required this.onTap,
+  });
+
+  final Color color;
+  final String label;
+  final bool isActive;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: label,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          width: 26,
+          height: 26,
+          decoration: BoxDecoration(
+            color: color,
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: isActive ? Colors.blueAccent : Colors.white38,
+              width: isActive ? 2.5 : 1,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A compact mode selector chip (for pressure mode).
+class _ModeChip extends StatelessWidget {
+  const _ModeChip({
+    required this.label,
+    required this.isActive,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool isActive;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: isActive
+              ? Colors.blueAccent.withValues(alpha: 0.3)
+              : Colors.white.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(6),
+          border: isActive
+              ? Border.all(color: Colors.blueAccent, width: 1)
+              : null,
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: isActive ? Colors.blueAccent : Colors.white54,
+            fontSize: 10,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A compact slider row for the inline color picker.
+class _ColorSliderRow extends StatelessWidget {
+  const _ColorSliderRow({
+    required this.label,
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.trackColor,
+    required this.onChanged,
+  });
+
+  final String label;
+  final double value;
+  final double min;
+  final double max;
+  final Color trackColor;
+  final ValueChanged<double> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        SizedBox(
+          width: 16,
+          child: Text(
+            label,
+            style: const TextStyle(
+              color: Colors.white54,
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        Expanded(
+          child: SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              trackHeight: 8,
+              activeTrackColor: trackColor,
+              inactiveTrackColor: Colors.white12,
+              thumbColor: Colors.white,
+              overlayColor: Colors.white24,
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+            ),
+            child: Slider(
+              value: value,
+              min: min,
+              max: max,
+              onChanged: onChanged,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// A quick color preset dot for the inline color picker.
+class _QuickColorDot extends StatelessWidget {
+  const _QuickColorDot({
+    required this.color,
+    required this.tooltip,
+    required this.onTap,
+  });
+
+  final Color color;
+  final String tooltip;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          width: 24,
+          height: 24,
+          decoration: BoxDecoration(
+            color: color,
+            shape: BoxShape.circle,
+            border: Border.all(color: Colors.white38, width: 1),
+          ),
         ),
       ),
     );

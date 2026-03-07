@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
+import '../models/grid_style.dart';
+import '../models/pressure_mode.dart';
 import '../models/stroke.dart';
 import '../models/stroke_point.dart';
 import '../models/tool_type.dart';
@@ -33,11 +35,14 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   /// The page ID for strokes. Using a fixed default page for Phase 2.
   final String _pageId = 'default-page';
 
-  /// Dot grid spacing in logical pixels.
+  /// Grid spacing in logical pixels.
   double _gridSpacing = 25.0;
 
-  /// Whether the dot grid is enabled.
-  bool _gridEnabled = true;
+  /// Current grid overlay style.
+  GridStyle _gridStyle = GridStyle.dots;
+
+  /// Current paper background color.
+  Color _paperColor = SketchPainter.defaultPaperColor;
 
   @override
   Widget build(BuildContext context) {
@@ -59,9 +64,14 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
                   painter: SketchPainter(
                     committedStrokes: drawingService.committedStrokes,
                     inflightStroke: drawingService.inflightStroke,
-                    gridSpacing: _gridEnabled ? _gridSpacing : 0,
+                    gridSpacing: _gridSpacing,
+                    gridStyle: _gridStyle,
+                    paperColor: _paperColor,
                     erasedStrokeIds:
                         _collectErasedIds(drawingService.committedStrokes),
+                    pressureMode: drawingService.pressureMode,
+                    grainIntensity:
+                        drawingService.currentLead?.grainIntensity ?? 0.25,
                   ),
                   size: Size.infinite,
                 ),
@@ -76,15 +86,22 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
             currentWeight: drawingService.currentWeight,
             currentLead: drawingService.currentLead,
             eraserToggleActive: drawingService.eraserToggleActive,
-            gridEnabled: _gridEnabled,
+            gridStyle: _gridStyle,
             gridSpacing: _gridSpacing,
+            paperColor: _paperColor,
+            pressureMode: drawingService.pressureMode,
             onToolChanged: (tool) => drawingService.currentTool = tool,
             onColorChanged: (color) => drawingService.currentColor = color,
             onWeightChanged: (weight) => drawingService.currentWeight = weight,
             onLeadChanged: (lead) => drawingService.applyPencilLead(lead),
             onEraserToggle: () => drawingService.toggleEraser(),
-            onGridToggle: () => setState(() => _gridEnabled = !_gridEnabled),
+            onGridStyleChanged: (style) =>
+                setState(() => _gridStyle = style),
             onGridSpacingChanged: (v) => setState(() => _gridSpacing = v),
+            onPaperColorChanged: (color) =>
+                setState(() => _paperColor = color),
+            onPressureModeChanged: (mode) =>
+                drawingService.pressureMode = mode,
             onClear: () => drawingService.clear(),
           ),
         ],
