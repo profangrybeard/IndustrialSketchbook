@@ -1,0 +1,404 @@
+import 'dart:convert';
+
+import 'package:sqflite/sqflite.dart';
+import 'package:path/path.dart' as p;
+
+import '../models/chapter.dart';
+import '../models/notebook.dart';
+import '../models/sketch_page.dart';
+import '../models/stroke.dart';
+import '../models/stroke_point.dart';
+
+/// SQLite database service (TDD §2, Appendix A).
+///
+/// Manages the stroke log (source of truth), sync queue, OCR cache,
+/// and FTS5 search index. Uses WAL mode for async writes that don't
+/// block the drawing thread.
+///
+/// ## Schema
+///
+/// See TDD Appendix A for the complete table definitions.
+class DatabaseService {
+  Database? _db;
+
+  /// The active database instance. Throws if not initialized.
+  Database get db {
+    final database = _db;
+    if (database == null) {
+      throw StateError('DatabaseService not initialized. Call initialize() first.');
+    }
+    return database;
+  }
+
+  /// Whether the database has been initialized.
+  bool get isInitialized => _db != null;
+
+  /// Initialize the database, creating all tables.
+  ///
+  /// Uses WAL journal mode for concurrent reads during writes
+  /// (TDD §4.1: "WAL mode, async isolate write").
+  Future<void> initialize({String? path}) async {
+    final dbPath = path ?? p.join(await getDatabasesPath(), 'industrial_sketchbook.db');
+
+    _db = await openDatabase(
+      dbPath,
+      version: 1,
+      onCreate: _onCreate,
+      onConfigure: (db) async {
+        // Enable WAL mode for better concurrent read/write performance
+        // Use rawQuery because journal_mode returns a result set
+        await db.rawQuery('PRAGMA journal_mode=WAL');
+        // Enable foreign keys
+        await db.execute('PRAGMA foreign_keys=ON');
+      },
+    );
+  }
+
+  /// Create all tables (TDD Appendix A).
+  Future<void> _onCreate(Database db, int version) async {
+    final batch = db.batch();
+
+    // Top-level container
+    batch.execute('''
+      CREATE TABLE notebooks (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        owner_id TEXT NOT NULL
+      )
+    ''');
+
+    // Named page groups
+    batch.execute('''
+      CREATE TABLE chapters (
+        id TEXT PRIMARY KEY,
+        notebook_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        sort_order INTEGER NOT NULL,
+        color INTEGER NOT NULL DEFAULT 4284513675,
+        FOREIGN KEY (notebook_id) REFERENCES notebooks(id)
+      )
+    ''');
+
+    // Canvas metadata
+    batch.execute('''
+      CREATE TABLE pages (
+        id TEXT PRIMARY KEY,
+        chapter_id TEXT NOT NULL,
+        page_number INTEGER NOT NULL,
+        style TEXT NOT NULL DEFAULT 'plain',
+        grid_config_json TEXT,
+        perspective_config_json TEXT,
+        parent_page_id TEXT,
+        branch_point_stroke_id TEXT,
+        branch_page_ids_json TEXT NOT NULL DEFAULT '[]',
+        layer_ids_json TEXT NOT NULL DEFAULT '["default"]',
+        FOREIGN KEY (chapter_id) REFERENCES chapters(id)
+      )
+    ''');
+
+    // The event log — source of truth (TDD §2)
+    batch.execute('''
+      CREATE TABLE strokes (
+        id TEXT PRIMARY KEY,
+        page_id TEXT NOT NULL,
+        layer_id TEXT NOT NULL DEFAULT 'default',
+        tool TEXT NOT NULL,
+        color INTEGER NOT NULL,
+        weight REAL NOT NULL,
+        opacity REAL NOT NULL,
+        points_blob BLOB NOT NULL,
+        created_at TEXT NOT NULL,
+        is_tombstone INTEGER NOT NULL DEFAULT 0,
+        erases_stroke_id TEXT,
+        synced INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (page_id) REFERENCES pages(id)
+      )
+    ''');
+
+    // Ordered stroke log per page
+    batch.execute('''
+      CREATE TABLE page_stroke_order (
+        page_id TEXT NOT NULL,
+        stroke_id TEXT NOT NULL,
+        sort_order INTEGER NOT NULL,
+        PRIMARY KEY (page_id, stroke_id),
+        FOREIGN KEY (page_id) REFERENCES pages(id),
+        FOREIGN KEY (stroke_id) REFERENCES strokes(id)
+      )
+    ''');
+
+    // Parallel image index (TDD §3.5)
+    batch.execute('''
+      CREATE TABLE gallery_images (
+        id TEXT PRIMARY KEY,
+        notebook_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        local_path TEXT NOT NULL,
+        cloud_storage_ref TEXT,
+        tags_json TEXT NOT NULL DEFAULT '[]',
+        page_refs_json TEXT NOT NULL DEFAULT '[]',
+        FOREIGN KEY (notebook_id) REFERENCES notebooks(id)
+      )
+    ''');
+
+    // Image pinned to canvas location
+    batch.execute('''
+      CREATE TABLE image_pins (
+        page_id TEXT NOT NULL,
+        image_id TEXT NOT NULL,
+        anchor_x REAL NOT NULL,
+        anchor_y REAL NOT NULL,
+        annotation_stroke_ids_json TEXT NOT NULL DEFAULT '[]',
+        pinned_at TEXT NOT NULL,
+        PRIMARY KEY (page_id, image_id),
+        FOREIGN KEY (page_id) REFERENCES pages(id),
+        FOREIGN KEY (image_id) REFERENCES gallery_images(id)
+      )
+    ''');
+
+    // Cached OCR results (TDD §4.2)
+    batch.execute('''
+      CREATE TABLE ocr_snapshots (
+        id TEXT PRIMARY KEY,
+        page_id TEXT NOT NULL,
+        stroke_count INTEGER NOT NULL,
+        regions_json TEXT NOT NULL,
+        captured_at TEXT NOT NULL,
+        FOREIGN KEY (page_id) REFERENCES pages(id)
+      )
+    ''');
+
+    // Pending sync outbox (TDD §4.3)
+    batch.execute('''
+      CREATE TABLE sync_queue (
+        id TEXT PRIMARY KEY,
+        event_type TEXT NOT NULL,
+        entity_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+      )
+    ''');
+
+    await batch.commit(noResult: true);
+
+    // FTS5 virtual table must be created outside the batch —
+    // sqflite batches don't reliably handle CREATE VIRTUAL TABLE.
+    // Note: Android system SQLite may not include the FTS5 module.
+    // If unavailable, search will be disabled until sqlite3_flutter_libs
+    // is added to bundle a full SQLite build with FTS5 support.
+    try {
+      await db.execute('''
+        CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
+          page_id,
+          chapter_id,
+          text,
+          canvas_x,
+          canvas_y
+        )
+      ''');
+    } on DatabaseException catch (e) {
+      // FTS5 not available on this device — search index will not be created
+      print('Warning: FTS5 not available, full-text search disabled: $e');
+    }
+  }
+
+  /// Close the database connection.
+  Future<void> close() async {
+    await _db?.close();
+    _db = null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Notebook CRUD
+  // ---------------------------------------------------------------------------
+
+  Future<void> insertNotebook(Notebook notebook) async {
+    await db.insert('notebooks', notebook.toDbMap(),
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<Notebook?> getNotebook(String id) async {
+    final rows = await db.query('notebooks', where: 'id = ?', whereArgs: [id]);
+    if (rows.isEmpty) return null;
+    return Notebook.fromDbMap(rows.first);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Chapter CRUD
+  // ---------------------------------------------------------------------------
+
+  Future<void> insertChapter(Chapter chapter) async {
+    await db.insert('chapters', chapter.toDbMap(),
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<Chapter?> getChapter(String id) async {
+    final rows = await db.query('chapters', where: 'id = ?', whereArgs: [id]);
+    if (rows.isEmpty) return null;
+    return Chapter.fromDbMap(rows.first);
+  }
+
+  Future<List<Chapter>> getChaptersByNotebook(String notebookId) async {
+    final rows = await db.query(
+      'chapters',
+      where: 'notebook_id = ?',
+      whereArgs: [notebookId],
+      orderBy: 'sort_order ASC',
+    );
+    return rows.map(Chapter.fromDbMap).toList();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Page CRUD
+  // ---------------------------------------------------------------------------
+
+  Future<void> insertPage(SketchPage page) async {
+    await db.insert('pages', page.toDbMap(),
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<SketchPage?> getPage(String id) async {
+    final rows = await db.query('pages', where: 'id = ?', whereArgs: [id]);
+    if (rows.isEmpty) return null;
+    return SketchPage.fromDbMap(rows.first);
+  }
+
+  Future<List<SketchPage>> getPagesByChapter(String chapterId) async {
+    final rows = await db.query(
+      'pages',
+      where: 'chapter_id = ?',
+      whereArgs: [chapterId],
+      orderBy: 'page_number ASC',
+    );
+    return rows.map(SketchPage.fromDbMap).toList();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Stroke CRUD — the core of the event log
+  // ---------------------------------------------------------------------------
+
+  /// Insert a stroke and add it to the page's stroke order.
+  ///
+  /// This is the primary write path. Called on pen-up (TDD §4.1).
+  /// Target latency: < 5ms (WAL mode, async isolate write).
+  Future<void> insertStroke(Stroke stroke) async {
+    await db.transaction((txn) async {
+      // Insert the stroke record
+      await txn.insert('strokes', stroke.toDbMap(),
+          conflictAlgorithm: ConflictAlgorithm.ignore);
+
+      // Get the next sort_order for this page
+      final maxOrder = Sqflite.firstIntValue(await txn.rawQuery(
+            'SELECT MAX(sort_order) FROM page_stroke_order WHERE page_id = ?',
+            [stroke.pageId],
+          )) ??
+          -1;
+
+      // Add to page_stroke_order
+      await txn.insert('page_stroke_order', {
+        'page_id': stroke.pageId,
+        'stroke_id': stroke.id,
+        'sort_order': maxOrder + 1,
+      });
+    });
+  }
+
+  /// Insert multiple strokes in a single transaction (batch write).
+  ///
+  /// Used by partial erasing to persist the tombstone + new segments
+  /// atomically.
+  Future<void> insertStrokes(List<Stroke> strokes) async {
+    await db.transaction((txn) async {
+      for (final stroke in strokes) {
+        await txn.insert('strokes', stroke.toDbMap(),
+            conflictAlgorithm: ConflictAlgorithm.ignore);
+
+        final maxOrder = Sqflite.firstIntValue(await txn.rawQuery(
+              'SELECT MAX(sort_order) FROM page_stroke_order WHERE page_id = ?',
+              [stroke.pageId],
+            )) ??
+            -1;
+
+        await txn.insert('page_stroke_order', {
+          'page_id': stroke.pageId,
+          'stroke_id': stroke.id,
+          'sort_order': maxOrder + 1,
+        });
+      }
+    });
+  }
+
+  /// Get all strokes for a page, ordered by the stroke log.
+  ///
+  /// This is the primary read path for rendering (TDD §4.1).
+  Future<List<Stroke>> getStrokesByPageId(String pageId) async {
+    final rows = await db.rawQuery('''
+      SELECT s.* FROM strokes s
+      INNER JOIN page_stroke_order pso ON s.id = pso.stroke_id
+      WHERE pso.page_id = ?
+      ORDER BY pso.sort_order ASC
+    ''', [pageId]);
+    return rows.map(Stroke.fromDbMap).toList();
+  }
+
+  /// Get a single stroke by ID.
+  Future<Stroke?> getStroke(String id) async {
+    final rows = await db.query('strokes', where: 'id = ?', whereArgs: [id]);
+    if (rows.isEmpty) return null;
+    return Stroke.fromDbMap(rows.first);
+  }
+
+  /// Get the ordered stroke IDs for a page (for VER-001 test).
+  Future<List<Map<String, dynamic>>> getPageStrokeOrder(String pageId) async {
+    return db.query(
+      'page_stroke_order',
+      where: 'page_id = ?',
+      whereArgs: [pageId],
+      orderBy: 'sort_order ASC',
+    );
+  }
+
+  /// Mark a stroke as synced.
+  Future<void> markStrokeSynced(String strokeId) async {
+    await db.update(
+      'strokes',
+      {'synced': 1},
+      where: 'id = ?',
+      whereArgs: [strokeId],
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sync Queue (TDD §4.3)
+  // ---------------------------------------------------------------------------
+
+  /// Enqueue a sync event.
+  Future<void> enqueueSyncEvent({
+    required String id,
+    required String eventType,
+    required String entityId,
+    required Map<String, dynamic> payload,
+  }) async {
+    await db.insert('sync_queue', {
+      'id': id,
+      'event_type': eventType,
+      'entity_id': entityId,
+      'payload_json': jsonEncode(payload),
+      'status': 'pending',
+      'retry_count': 0,
+      'created_at': DateTime.now().toUtc().toIso8601String(),
+    });
+  }
+
+  /// Get all pending sync events, ordered by creation time.
+  Future<List<Map<String, dynamic>>> getPendingSyncEvents() async {
+    return db.query(
+      'sync_queue',
+      where: 'status = ?',
+      whereArgs: ['pending'],
+      orderBy: 'created_at ASC',
+    );
+  }
+}
