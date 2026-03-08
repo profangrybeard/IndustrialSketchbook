@@ -360,6 +360,30 @@ class DatabaseService {
     );
   }
 
+  /// Delete strokes by their IDs (used by undo to reverse previous actions).
+  ///
+  /// Removes both the stroke records and their page_stroke_order entries
+  /// in a single transaction. This is the minimal relaxation of the
+  /// append-only invariant — only undo calls delete, and only for
+  /// strokes it previously added.
+  Future<void> deleteStrokes(String pageId, List<String> strokeIds) async {
+    if (strokeIds.isEmpty) return;
+    await db.transaction((txn) async {
+      for (final id in strokeIds) {
+        await txn.delete(
+          'page_stroke_order',
+          where: 'page_id = ? AND stroke_id = ?',
+          whereArgs: [pageId, id],
+        );
+        await txn.delete(
+          'strokes',
+          where: 'id = ?',
+          whereArgs: [id],
+        );
+      }
+    });
+  }
+
   /// Mark a stroke as synced.
   Future<void> markStrokeSynced(String strokeId) async {
     await db.update(

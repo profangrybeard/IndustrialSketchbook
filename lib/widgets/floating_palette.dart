@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
+import '../models/eraser_mode.dart';
 import '../models/grid_style.dart';
 import '../models/pencil_lead.dart';
+import '../models/pressure_curve.dart';
 import '../models/pressure_mode.dart';
 import '../models/tool_type.dart';
 
@@ -21,6 +23,10 @@ class FloatingPalette extends StatefulWidget {
     required this.gridSpacing,
     required this.paperColor,
     required this.pressureMode,
+    required this.pressureCurve,
+    required this.eraserMode,
+    required this.canUndo,
+    required this.canRedo,
     required this.onToolChanged,
     required this.onColorChanged,
     required this.onWeightChanged,
@@ -30,6 +36,10 @@ class FloatingPalette extends StatefulWidget {
     required this.onGridSpacingChanged,
     required this.onPaperColorChanged,
     required this.onPressureModeChanged,
+    required this.onPressureCurveChanged,
+    required this.onEraserModeChanged,
+    required this.onUndo,
+    required this.onRedo,
     required this.onClear,
   });
 
@@ -42,6 +52,10 @@ class FloatingPalette extends StatefulWidget {
   final double gridSpacing;
   final Color paperColor;
   final PressureMode pressureMode;
+  final PressureCurve pressureCurve;
+  final EraserMode eraserMode;
+  final bool canUndo;
+  final bool canRedo;
   final ValueChanged<ToolType> onToolChanged;
   final ValueChanged<int> onColorChanged;
   final ValueChanged<double> onWeightChanged;
@@ -51,6 +65,10 @@ class FloatingPalette extends StatefulWidget {
   final ValueChanged<double> onGridSpacingChanged;
   final ValueChanged<Color> onPaperColorChanged;
   final ValueChanged<PressureMode> onPressureModeChanged;
+  final ValueChanged<PressureCurve> onPressureCurveChanged;
+  final ValueChanged<EraserMode> onEraserModeChanged;
+  final VoidCallback onUndo;
+  final VoidCallback onRedo;
   final VoidCallback onClear;
 
   @override
@@ -165,6 +183,21 @@ class _FloatingPaletteState extends State<FloatingPalette> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          // Undo / Redo buttons (top of strip)
+          _UndoRedoIcon(
+            icon: Icons.undo,
+            tooltip: 'Undo',
+            enabled: widget.canUndo,
+            onTap: widget.onUndo,
+          ),
+          _UndoRedoIcon(
+            icon: Icons.redo,
+            tooltip: 'Redo',
+            enabled: widget.canRedo,
+            onTap: widget.onRedo,
+          ),
+          const _PaletteDivider(),
+
           // Tool selector
           _PaletteIcon(
             icon: _iconForTool(widget.currentTool),
@@ -344,6 +377,68 @@ class _FloatingPaletteState extends State<FloatingPalette> {
                     label: mode.label,
                     isActive: widget.pressureMode == mode,
                     onTap: () => widget.onPressureModeChanged(mode),
+                  ),
+                ),
+            ],
+          ),
+
+          // Pressure curve selector
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 4),
+            child: Divider(height: 1, color: Colors.white24),
+          ),
+          const Padding(
+            padding: EdgeInsets.only(left: 4, bottom: 4),
+            child: Text(
+              'Curve',
+              style: TextStyle(
+                color: Colors.white54,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          Wrap(
+            spacing: 4,
+            runSpacing: 4,
+            children: [
+              for (final curve in PressureCurve.values)
+                _ModeChip(
+                  label: curve.label,
+                  isActive: widget.pressureCurve == curve,
+                  onTap: () => widget.onPressureCurveChanged(curve),
+                ),
+            ],
+          ),
+        ],
+
+        // Eraser mode selector (shown when eraser is active)
+        if (widget.eraserToggleActive) ...[
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 4),
+            child: Divider(height: 1, color: Colors.white24),
+          ),
+          const Padding(
+            padding: EdgeInsets.only(left: 4, bottom: 4),
+            child: Text(
+              'Eraser Mode',
+              style: TextStyle(
+                color: Colors.white54,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final mode in EraserMode.values)
+                Padding(
+                  padding: const EdgeInsets.only(right: 4),
+                  child: _ModeChip(
+                    label: mode.label,
+                    isActive: widget.eraserMode == mode,
+                    onTap: () => widget.onEraserModeChanged(mode),
                   ),
                 ),
             ],
@@ -648,6 +743,42 @@ class _FloatingPaletteState extends State<FloatingPalette> {
 // =============================================================================
 // Palette sub-widgets
 // =============================================================================
+
+/// An undo/redo icon button — dims when disabled.
+class _UndoRedoIcon extends StatelessWidget {
+  const _UndoRedoIcon({
+    required this.icon,
+    required this.tooltip,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: enabled ? onTap : null,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          width: 40,
+          height: 32,
+          alignment: Alignment.center,
+          child: Icon(
+            icon,
+            color: enabled ? Colors.white70 : Colors.white24,
+            size: 20,
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 /// A single icon button in the palette strip.
 class _PaletteIcon extends StatelessWidget {
