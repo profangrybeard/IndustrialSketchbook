@@ -20,6 +20,7 @@ class PageStrip extends StatelessWidget {
     required this.onNewChapter,
     this.onPrevPage,
     this.onNextPage,
+    this.onOrganize,
     super.key,
   });
 
@@ -52,6 +53,9 @@ class PageStrip extends StatelessWidget {
 
   /// Create a new chapter with one blank page.
   final VoidCallback onNewChapter;
+
+  /// Open the organize panel (null = button hidden).
+  final VoidCallback? onOrganize;
 
   static const _labelStyle = TextStyle(
     color: Color.fromRGBO(255, 255, 255, 0.85),
@@ -134,6 +138,15 @@ class PageStrip extends StatelessWidget {
                     color: const Color.fromRGBO(255, 255, 255, 0.5),
                   ),
                 ),
+              ),
+
+              // Organize chapters
+              _verticalDivider(),
+
+              _stripButton(
+                icon: Icons.toc,
+                onPressed: onOrganize,
+                tooltip: 'Organize chapters',
               ),
 
               // Divider

@@ -25,6 +25,7 @@ import 'background_painter.dart';
 import 'committed_strokes_painter.dart';
 import 'developer_overlay.dart';
 import 'floating_palette.dart';
+import 'organize_panel.dart';
 import 'page_strip.dart';
 
 const _uuid = Uuid();
@@ -53,6 +54,9 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   /// Whether strokes have been loaded from the database for the current page.
   /// Prevents re-loading on every widget rebuild. Reset on page switch.
   bool _strokesLoaded = false;
+
+  /// Whether the organize panel (Layer 4c) is currently visible.
+  bool _showOrganizePanel = false;
 
   /// The current page ID, read from the Riverpod provider.
   String get _pageId => ref.read(currentPageIdProvider);
@@ -305,6 +309,8 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
                       onNewPage: () => _createNewPage(drawingService),
                       onNewChapter: () =>
                           _createNewChapter(drawingService),
+                      onOrganize: () =>
+                          setState(() => _showOrganizePanel = true),
                     ),
                   ],
                 );
@@ -315,6 +321,29 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
                   DeveloperOverlay(drawingService: drawingService),
             );
           }),
+
+          // Organize panel overlay + scrim (Layer 4c)
+          if (_showOrganizePanel) ...[
+            // Scrim: semi-transparent backdrop that dismisses the panel
+            Positioned.fill(
+              child: GestureDetector(
+                onTap: () => setState(() => _showOrganizePanel = false),
+                child: Container(
+                  color: Colors.black.withValues(alpha: 0.3),
+                ),
+              ),
+            ),
+            // The organize panel itself
+            OrganizePanel(
+              onClose: () => setState(() => _showOrganizePanel = false),
+              onNavigateToChapter: (chapterId) {
+                _navigateToFirstPageOfChapter(chapterId, drawingService);
+                setState(() => _showOrganizePanel = false);
+              },
+              onSwitchToPage: (pageId) =>
+                  _switchToPage(pageId, drawingService),
+            ),
+          ],
         ],
       ),
     );
@@ -773,6 +802,28 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       }
     } catch (e) {
       debugPrint('Failed to create new chapter: $e');
+    }
+  }
+
+  /// Navigate to the first page of a chapter (for organize panel jump-to).
+  Future<void> _navigateToFirstPageOfChapter(
+    String chapterId,
+    DrawingService drawingService,
+  ) async {
+    try {
+      final dbAsync = ref.read(databaseServiceProvider);
+      final db = dbAsync.valueOrNull;
+      if (db == null) return;
+
+      final pages = await db.getPagesByChapter(chapterId);
+      if (pages.isNotEmpty) {
+        ref.read(currentChapterIdProvider.notifier).state = chapterId;
+        if (mounted) {
+          _switchToPage(pages.first.id, drawingService);
+        }
+      }
+    } catch (e) {
+      debugPrint('Failed to navigate to chapter: $e');
     }
   }
 
