@@ -319,12 +319,30 @@ class DrawingService extends ChangeNotifier {
 
   /// Called on stylus ACTION_MOVE (fires at 120–240 Hz on OnePlus Pad).
   ///
-  /// Appends a point to the in-flight stroke's shared points list.
-  /// O(1) amortized — no list copy, no Stroke reallocation.
+  /// Appends a point to the shared [_inflightPoints] list (O(1) amortized),
+  /// then creates a new [Stroke] shell referencing the same list. The new
+  /// object identity is needed for Flutter's change-detection to trigger
+  /// a repaint — but the list itself is never copied.
   void onPointerMove(StrokePoint point) {
-    if (_inflightStroke == null) return;
+    final stroke = _inflightStroke;
+    if (stroke == null) return;
 
     _inflightPoints.add(point);
+
+    // New Stroke identity (cheap — 12 field assignments) sharing the
+    // same growable points list (no copy). This satisfies Flutter's
+    // identity-based repaint gating while keeping O(1) append cost.
+    _inflightStroke = Stroke(
+      id: stroke.id,
+      pageId: stroke.pageId,
+      layerId: stroke.layerId,
+      tool: stroke.tool,
+      color: stroke.color,
+      weight: stroke.weight,
+      opacity: stroke.opacity,
+      points: _inflightPoints,
+      createdAt: stroke.createdAt,
+    );
     notifyListeners();
   }
 
