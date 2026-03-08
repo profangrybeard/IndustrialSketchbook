@@ -1,28 +1,43 @@
+import 'dart:math' as math;
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/eraser_mode.dart';
+import '../models/grid_config.dart';
 import '../models/grid_style.dart';
+import '../models/page_style.dart';
+import '../models/sketch_page.dart';
 import '../models/stroke.dart';
 import '../models/stroke_point.dart';
 import '../models/tool_type.dart';
 import '../models/undo_action.dart';
 import '../providers/database_provider.dart';
 import '../providers/drawing_provider.dart';
+import '../providers/notebook_provider.dart';
 import '../services/drawing_service.dart';
 import '../utils/stroke_splitter.dart';
+import 'active_stroke_painter.dart';
+import 'background_painter.dart';
+import 'committed_strokes_painter.dart';
+import 'developer_overlay.dart';
 import 'floating_palette.dart';
-import 'sketch_painter.dart';
+import 'page_strip.dart';
 
 const _uuid = Uuid();
 
-/// The main drawing canvas (TDD §4.1, Phase 2.7).
+/// The main drawing canvas (TDD §4.1, Phase 2.8).
 ///
-/// Full-screen canvas with a floating dockable palette. Captures stylus
-/// input via [Listener], feeds it to [DrawingService], and renders strokes
-/// via [SketchPainter]. Persists committed strokes to SQLite asynchronously.
+/// Uses a three-layer [RepaintBoundary] architecture for performance:
+/// - Layer 1: Background (paper + grid) — repaints only on settings change
+/// - Layer 2: Committed strokes — repaints only on commit/undo/erase/clear
+/// - Layer 3: Active stroke + eraser cursor — repaints every pointer move
+///
+/// Also implements stroke stitching (Phase 2.8): when a new stroke starts
+/// near where the previous stroke ended (< 150ms, < 20px, same style),
+/// a bridge point is prepended to eliminate gaps between strokes.
 class CanvasWidget extends ConsumerStatefulWidget {
   const CanvasWidget({super.key});
 
@@ -34,8 +49,12 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   /// Whether a stylus/pen is currently active (for palm rejection).
   bool _penActive = false;
 
-  /// The page ID for strokes. Using a fixed default page for Phase 2.
-  final String _pageId = 'default-page';
+  /// Whether strokes have been loaded from the database for the current page.
+  /// Prevents re-loading on every widget rebuild. Reset on page switch.
+  bool _strokesLoaded = false;
+
+  /// The current page ID, read from the Riverpod provider.
+  String get _pageId => ref.read(currentPageIdProvider);
 
   /// Grid spacing in logical pixels.
   double _gridSpacing = 25.0;
@@ -44,21 +63,108 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   GridStyle _gridStyle = GridStyle.dots;
 
   /// Current paper background color.
-  Color _paperColor = SketchPainter.defaultPaperColor;
+  Color _paperColor = BackgroundPainter.defaultPaperColor;
 
   /// Current eraser cursor position (null when eraser is not active or
   /// when the pointer is not over the canvas).
   Offset? _eraserCursorPosition;
+
+  // ---------------------------------------------------------------------------
+  // Stroke stitching state (Phase 2.8)
+  // ---------------------------------------------------------------------------
+
+  /// End point of the most recently committed stroke.
+  StrokePoint? _lastCommittedEndPoint;
+
+  /// Timestamp (microseconds) when the last stroke was committed.
+  int _lastCommittedTimestamp = 0;
+
+  /// Tool of the last committed stroke (for style matching).
+  ToolType? _lastCommittedTool;
+
+  /// Color of the last committed stroke (for style matching).
+  int? _lastCommittedColor;
+
+  /// Weight of the last committed stroke (for style matching).
+  double? _lastCommittedWeight;
+
+  /// Whether the current inflight stroke has a stitch point prepended.
+  bool _hasStitchPoint = false;
 
   @override
   Widget build(BuildContext context) {
     final drawingService = ref.watch(drawingServiceProvider);
     final hitRadius = drawingService.currentWeight * 2.0;
 
+    // --- Page recall: load persisted strokes + page settings on first build ---
+    // The database provider is async (FutureProvider). When it resolves,
+    // load all strokes and page settings for the current page.
+    // This runs once per page — _strokesLoaded prevents re-loading.
+    if (!_strokesLoaded) {
+      final dbAsync = ref.watch(databaseServiceProvider);
+      dbAsync.whenData((db) {
+        _strokesLoaded = true;
+        // Schedule after this build frame to avoid setState-during-build
+        // (loadStrokes calls notifyListeners which triggers rebuild)
+        Future.microtask(() async {
+          if (!mounted) return;
+
+          // Load strokes
+          final strokes = await db.getStrokesByPageId(_pageId);
+          if (mounted && strokes.isNotEmpty) {
+            drawingService.loadStrokes(strokes);
+          }
+
+          // Load page settings (grid style, spacing, paper color)
+          final page = await db.getPage(_pageId);
+          if (mounted && page != null) {
+            setState(() {
+              _gridStyle = GridStyle.fromPageStyle(page.style);
+              _gridSpacing = page.gridConfig?.spacing ?? 25.0;
+              _paperColor = Color(page.paperColor);
+            });
+          }
+        });
+      });
+    }
+
     return Scaffold(
       body: Stack(
         children: [
-          // Canvas layer (full screen)
+          // Layer 1: Background (paper + grid) — cached by RepaintBoundary
+          Positioned.fill(
+            child: RepaintBoundary(
+              child: CustomPaint(
+                painter: BackgroundPainter(
+                  paperColor: _paperColor,
+                  gridStyle: _gridStyle,
+                  gridSpacing: _gridSpacing,
+                ),
+                size: Size.infinite,
+              ),
+            ),
+          ),
+
+          // Layer 2: Committed strokes — cached by RepaintBoundary
+          Positioned.fill(
+            child: RepaintBoundary(
+              child: CustomPaint(
+                painter: CommittedStrokesPainter(
+                  committedStrokes: drawingService.committedStrokes,
+                  erasedStrokeIds: drawingService.erasedStrokeIds,
+                  strokeVersion: drawingService.strokeVersion,
+                  pressureMode: drawingService.pressureMode,
+                  grainIntensity:
+                      drawingService.currentLead?.grainIntensity ?? 0.25,
+                  pressureExponent:
+                      drawingService.pressureCurve.exponent,
+                ),
+                size: Size.infinite,
+              ),
+            ),
+          ),
+
+          // Layer 3: Active stroke + eraser cursor (with pointer input)
           Positioned.fill(
             child: Listener(
               onPointerDown: (event) => _handlePointerDown(event),
@@ -68,24 +174,19 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
               behavior: HitTestBehavior.opaque,
               child: RepaintBoundary(
                 child: CustomPaint(
-                  painter: SketchPainter(
-                    committedStrokes: drawingService.committedStrokes,
+                  painter: ActiveStrokePainter(
                     inflightStroke: drawingService.inflightStroke,
-                    gridSpacing: _gridSpacing,
-                    gridStyle: _gridStyle,
-                    paperColor: _paperColor,
-                    erasedStrokeIds:
-                        _collectErasedIds(drawingService.committedStrokes),
-                    pressureMode: drawingService.pressureMode,
-                    grainIntensity:
-                        drawingService.currentLead?.grainIntensity ?? 0.25,
-                    pressureExponent:
-                        drawingService.pressureCurve.exponent,
                     eraserCursorPosition: _eraserCursorPosition,
                     eraserRadius: hitRadius,
                     showEraserCursor:
                         drawingService.currentTool == ToolType.eraser &&
                             _eraserCursorPosition != null,
+                    pressureMode: drawingService.pressureMode,
+                    grainIntensity:
+                        drawingService.currentLead?.grainIntensity ?? 0.25,
+                    pressureExponent:
+                        drawingService.pressureCurve.exponent,
+                    suppressSinglePoint: !_hasStitchPoint,
                   ),
                   size: Size.infinite,
                 ),
@@ -119,11 +220,18 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
                 setState(() => _eraserCursorPosition = null);
               }
             },
-            onGridStyleChanged: (style) =>
-                setState(() => _gridStyle = style),
-            onGridSpacingChanged: (v) => setState(() => _gridSpacing = v),
-            onPaperColorChanged: (color) =>
-                setState(() => _paperColor = color),
+            onGridStyleChanged: (style) {
+              setState(() => _gridStyle = style);
+              _persistPageSettings();
+            },
+            onGridSpacingChanged: (v) {
+              setState(() => _gridSpacing = v);
+              _persistPageSettings();
+            },
+            onPaperColorChanged: (color) {
+              setState(() => _paperColor = color);
+              _persistPageSettings();
+            },
             onPressureModeChanged: (mode) =>
                 drawingService.pressureMode = mode,
             onPressureCurveChanged: (curve) =>
@@ -134,20 +242,50 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
             onRedo: () => _handleRedo(drawingService),
             onClear: () => _handleClear(drawingService),
           ),
+
+          // Developer overlay + page navigation — both need page list data
+          Builder(builder: (context) {
+            final pagesAsync = ref.watch(pagesForChapterProvider);
+            final currentPageId = ref.watch(currentPageIdProvider);
+            return pagesAsync.when(
+              data: (pages) {
+                final currentIndex =
+                    pages.indexWhere((p) => p.id == currentPageId);
+                final safeIndex = currentIndex >= 0 ? currentIndex : 0;
+                return Stack(
+                  children: [
+                    // Developer overlay (Phase 2.8.1)
+                    DeveloperOverlay(
+                      drawingService: drawingService,
+                      currentPageIndex: safeIndex,
+                      totalPages: pages.length,
+                    ),
+                    // Page navigation strip (Layer 3)
+                    PageStrip(
+                      currentPage: safeIndex,
+                      totalPages: pages.length,
+                      onPrevPage: safeIndex > 0
+                          ? () => _switchToPage(
+                                pages[safeIndex - 1].id, drawingService)
+                          : null,
+                      onNextPage: safeIndex < pages.length - 1
+                          ? () => _switchToPage(
+                                pages[safeIndex + 1].id, drawingService)
+                          : null,
+                      onNewPage: () => _createNewPage(drawingService),
+                    ),
+                  ],
+                );
+              },
+              loading: () =>
+                  DeveloperOverlay(drawingService: drawingService),
+              error: (_, __) =>
+                  DeveloperOverlay(drawingService: drawingService),
+            );
+          }),
         ],
       ),
     );
-  }
-
-  /// Collect all stroke IDs that have been erased by tombstone strokes.
-  Set<String> _collectErasedIds(List<Stroke> strokes) {
-    final erased = <String>{};
-    for (final s in strokes) {
-      if (s.isTombstone && s.erasesStrokeId != null) {
-        erased.add(s.erasesStrokeId!);
-      }
-    }
-    return erased;
   }
 
   // ---------------------------------------------------------------------------
@@ -176,10 +314,21 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       return;
     }
 
+    // --- Stroke stitching (Phase 2.8) ---
+    final point = _eventToPoint(event);
+    StrokePoint? stitchPoint;
+    _hasStitchPoint = false;
+
+    if (_shouldStitch(event, drawingService)) {
+      stitchPoint = _lastCommittedEndPoint;
+      _hasStitchPoint = true;
+    }
+
     drawingService.onPointerDown(
       strokeId: _uuid.v4(),
       pageId: _pageId,
-      point: _eventToPoint(event),
+      point: point,
+      stitchPoint: stitchPoint,
     );
   }
 
@@ -216,7 +365,6 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
 
     // Eraser doesn't commit a stroke — just clear position tracking
     if (drawingService.currentTool == ToolType.eraser) {
-      // Keep the cursor visible at last position (it follows pointer hover)
       return;
     }
 
@@ -224,6 +372,15 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
 
     // Persist to SQLite asynchronously — does NOT block the UI thread
     if (committed != null) {
+      // Track for stroke stitching (Phase 2.8)
+      if (committed.points.isNotEmpty) {
+        _lastCommittedEndPoint = committed.points.last;
+        _lastCommittedTimestamp = committed.points.last.timestamp;
+        _lastCommittedTool = committed.tool;
+        _lastCommittedColor = committed.color;
+        _lastCommittedWeight = committed.weight;
+      }
+
       // Push undo action for the drawn stroke
       drawingService.pushUndoAction(
         UndoAction(strokesAdded: [committed]),
@@ -246,14 +403,56 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   }
 
   // ---------------------------------------------------------------------------
+  // Stroke stitching (Phase 2.8)
+  // ---------------------------------------------------------------------------
+
+  /// Whether a new stroke should be stitched to the previous one.
+  ///
+  /// Returns true if the previous stroke ended recently (< 150ms),
+  /// spatially close (< 20px), and with the same drawing style.
+  bool _shouldStitch(PointerDownEvent event, DrawingService drawingService) {
+    if (_lastCommittedEndPoint == null) return false;
+
+    // Only stitch drawing tools (not eraser)
+    if (drawingService.currentTool == ToolType.eraser) return false;
+
+    // Style must match
+    if (drawingService.currentTool != _lastCommittedTool) return false;
+    if (drawingService.currentColor != _lastCommittedColor) return false;
+    if (drawingService.currentWeight != _lastCommittedWeight) return false;
+
+    // Temporal proximity: within 500ms
+    // Natural handwriting pen-lifts between letters are typically 150–400ms.
+    // The original 150ms threshold was too tight and missed most transitions.
+    final currentTimestamp = event.timeStamp.inMicroseconds;
+    final timeDelta = currentTimestamp - _lastCommittedTimestamp;
+    if (timeDelta > 500000) return false;
+
+    // Spatial proximity: within 50 logical pixels
+    // Generous threshold covers fast cursive strokes where the pen lands
+    // further from the last lift point.
+    final dx = event.localPosition.dx - _lastCommittedEndPoint!.x;
+    final dy = event.localPosition.dy - _lastCommittedEndPoint!.y;
+    if (dx * dx + dy * dy > 2500.0) return false;
+
+    return true;
+  }
+
+  /// Reset stroke stitching state (on undo/redo/clear).
+  void _resetStitchState() {
+    _lastCommittedEndPoint = null;
+    _lastCommittedTimestamp = 0;
+    _lastCommittedTool = null;
+    _lastCommittedColor = null;
+    _lastCommittedWeight = null;
+    _hasStitchPoint = false;
+  }
+
+  // ---------------------------------------------------------------------------
   // Standard erasing (stroke subdivision) — Phase 2.5
   // ---------------------------------------------------------------------------
 
   /// Erase portions of strokes near the given position.
-  ///
-  /// Instead of tombstoning entire strokes, identifies specific points
-  /// within the eraser radius and splits the stroke into surviving segments.
-  /// Preserves the append-only log invariant (TDD §3.2).
   void _standardEraseAt(Offset position, DrawingService drawingService) {
     final hitRadius = drawingService.currentWeight * 2.0;
     final hitRect = Rect.fromCenter(
@@ -262,7 +461,8 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       height: hitRadius * 2,
     );
 
-    final erasedIds = _collectErasedIds(drawingService.committedStrokes);
+    // Start from the cached set, but track local additions within this call
+    final erasedIds = Set<String>.from(drawingService.erasedStrokeIds);
     final strokesToAdd = <Stroke>[];
 
     for (final stroke
@@ -271,17 +471,14 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       if (erasedIds.contains(stroke.id)) continue;
       if (!stroke.boundingRect.overlaps(hitRect)) continue;
 
-      // Split the stroke's points, removing those within eraser radius
       final segments = splitStrokePoints(
         points: stroke.points,
         eraserPosition: position,
         eraserRadius: hitRadius,
       );
 
-      // null = no points hit — stroke unaffected
       if (segments == null) continue;
 
-      // Tombstone the original stroke
       final tombstone = Stroke.tombstone(
         id: _uuid.v4(),
         pageId: _pageId,
@@ -291,7 +488,6 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       strokesToAdd.add(tombstone);
       erasedIds.add(stroke.id);
 
-      // Create new strokes for each surviving segment
       for (final segment in segments) {
         strokesToAdd.add(Stroke(
           id: _uuid.v4(),
@@ -308,15 +504,13 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
     }
 
     if (strokesToAdd.isNotEmpty) {
-      drawingService.committedStrokes.addAll(strokesToAdd);
+      drawingService.addCommittedStrokes(strokesToAdd);
       drawingService.notifyListeners();
 
-      // Push undo action for the erase operation
       drawingService.pushUndoAction(
         UndoAction(strokesAdded: strokesToAdd),
       );
 
-      // Batch-persist all new strokes
       _persistStrokes(strokesToAdd);
     }
   }
@@ -326,24 +520,16 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   // ---------------------------------------------------------------------------
 
   /// Erase the newest whole stroke at the given position.
-  ///
-  /// Unlike standard erasing, does not split strokes. Instead,
-  /// tombstones the most recently created stroke whose bounding rect
-  /// contains the eraser position. Subsequent passes at the same
-  /// position hit progressively older strokes.
   void _historyEraseAt(Offset position, DrawingService drawingService) {
     final hitRadius = drawingService.currentWeight * 2.0;
 
-    final erasedIds = _collectErasedIds(drawingService.committedStrokes);
+    final erasedIds = drawingService.erasedStrokeIds;
 
-    // Find all visible, non-tombstoned strokes that the eraser overlaps
     final candidates = <Stroke>[];
     for (final stroke in drawingService.committedStrokes) {
       if (stroke.isTombstone) continue;
       if (erasedIds.contains(stroke.id)) continue;
 
-      // Check if eraser position is within the stroke's bounding rect
-      // (inflated by eraser radius for more forgiving hit detection)
       final inflatedRect = stroke.boundingRect.inflate(hitRadius);
       if (inflatedRect.contains(position)) {
         candidates.add(stroke);
@@ -352,11 +538,9 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
 
     if (candidates.isEmpty) return;
 
-    // Sort by creation time descending — newest first
     candidates.sort((a, b) => b.createdAt.compareTo(a.createdAt));
     final newest = candidates.first;
 
-    // Tombstone the newest stroke
     final tombstone = Stroke.tombstone(
       id: _uuid.v4(),
       pageId: _pageId,
@@ -364,15 +548,13 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       createdAt: DateTime.now().toUtc(),
     );
 
-    drawingService.committedStrokes.add(tombstone);
+    drawingService.addCommittedStrokes([tombstone]);
     drawingService.notifyListeners();
 
-    // Push undo action
     drawingService.pushUndoAction(
       UndoAction(strokesAdded: [tombstone]),
     );
 
-    // Persist tombstone to DB
     _persistStroke(tombstone);
   }
 
@@ -380,61 +562,43 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   // Undo / Redo — Phase 2.7
   // ---------------------------------------------------------------------------
 
-  /// Undo the most recent action.
-  ///
-  /// Removes strokes that were added by the action and re-adds
-  /// strokes that were removed. Syncs changes to DB.
   void _handleUndo(DrawingService drawingService) {
     final action = drawingService.popUndo();
     if (action == null) return;
 
-    // Remove strokes that were added by this action
     if (action.strokesAdded.isNotEmpty) {
       final addedIds = action.strokesAdded.map((s) => s.id).toSet();
-      drawingService.committedStrokes
-          .removeWhere((s) => addedIds.contains(s.id));
-
-      // Delete from DB
+      drawingService.removeCommittedStrokesWhere(
+          (s) => addedIds.contains(s.id));
       _deleteStrokes(addedIds.toList());
     }
 
-    // Re-add strokes that were removed by this action
     if (action.strokesRemoved.isNotEmpty) {
-      drawingService.committedStrokes.addAll(action.strokesRemoved);
-
-      // Re-persist to DB
+      drawingService.addCommittedStrokes(action.strokesRemoved);
       _persistStrokes(action.strokesRemoved);
     }
 
+    _resetStitchState();
     drawingService.notifyListeners();
   }
 
-  /// Redo a previously undone action.
-  ///
-  /// Re-adds the strokes that were originally added, and re-removes
-  /// the strokes that were originally removed. Syncs changes to DB.
   void _handleRedo(DrawingService drawingService) {
     final action = drawingService.popRedo();
     if (action == null) return;
 
-    // Re-add strokes that were originally added
     if (action.strokesAdded.isNotEmpty) {
-      drawingService.committedStrokes.addAll(action.strokesAdded);
-
-      // Re-persist to DB
+      drawingService.addCommittedStrokes(action.strokesAdded);
       _persistStrokes(action.strokesAdded);
     }
 
-    // Re-remove strokes that were originally removed
     if (action.strokesRemoved.isNotEmpty) {
       final removedIds = action.strokesRemoved.map((s) => s.id).toSet();
-      drawingService.committedStrokes
-          .removeWhere((s) => removedIds.contains(s.id));
-
-      // Delete from DB
+      drawingService.removeCommittedStrokesWhere(
+          (s) => removedIds.contains(s.id));
       _deleteStrokes(removedIds.toList());
     }
 
+    _resetStitchState();
     drawingService.notifyListeners();
   }
 
@@ -442,24 +606,19 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   // Clear canvas — Phase 2.7 (with undo support)
   // ---------------------------------------------------------------------------
 
-  /// Clear the canvas with undo support.
-  ///
-  /// Creates tombstones for all visible strokes, pushes an undo action,
-  /// then clears.
   void _handleClear(DrawingService drawingService) {
-    final erasedIds = _collectErasedIds(drawingService.committedStrokes);
+    final erasedIds = drawingService.erasedStrokeIds;
 
-    // Find all visible (non-tombstone, non-erased) strokes
     final visibleStrokes = drawingService.committedStrokes
         .where((s) => !s.isTombstone && !erasedIds.contains(s.id))
         .toList();
 
     if (visibleStrokes.isEmpty) {
       drawingService.clear();
+      _resetStitchState();
       return;
     }
 
-    // Create tombstones for all visible strokes
     final tombstones = <Stroke>[];
     for (final stroke in visibleStrokes) {
       tombstones.add(Stroke.tombstone(
@@ -470,19 +629,74 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       ));
     }
 
-    // Add tombstones to committed strokes before clearing
-    drawingService.committedStrokes.addAll(tombstones);
+    drawingService.addCommittedStrokes(tombstones);
 
-    // Push undo action with all tombstones
     drawingService.pushUndoAction(
       UndoAction(strokesAdded: tombstones),
     );
 
-    // Persist tombstones
     _persistStrokes(tombstones);
 
-    // Now clear the visual state (but don't clear undo history)
+    _resetStitchState();
     drawingService.clear();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Page navigation (Layer 3)
+  // ---------------------------------------------------------------------------
+
+  /// Switch to a different page.
+  ///
+  /// Persists current page settings, clears the drawing service,
+  /// resets all transient state, then triggers a reload for the new page.
+  void _switchToPage(String newPageId, DrawingService drawingService) {
+    if (newPageId == _pageId) return;
+
+    // Persist current page settings before leaving
+    _persistPageSettings();
+
+    // Clear drawing state
+    drawingService.clear();
+    drawingService.clearUndoHistory();
+    _resetStitchState();
+
+    // Update the provider to the new page
+    ref.read(currentPageIdProvider.notifier).state = newPageId;
+
+    // Reset load flag so the next build loads the new page's data
+    setState(() {
+      _strokesLoaded = false;
+      _gridStyle = GridStyle.none;
+      _gridSpacing = 25.0;
+      _paperColor = BackgroundPainter.defaultPaperColor;
+    });
+  }
+
+  /// Create a new blank page at the end of the current chapter and switch to it.
+  Future<void> _createNewPage(DrawingService drawingService) async {
+    try {
+      final dbAsync = ref.read(databaseServiceProvider);
+      final db = dbAsync.valueOrNull;
+      if (db == null) return;
+
+      final pageCount = await db.getPageCount(defaultChapterId);
+      final newPageId = _uuid.v4();
+
+      await db.insertPage(SketchPage(
+        id: newPageId,
+        chapterId: defaultChapterId,
+        pageNumber: pageCount,
+      ));
+
+      // Invalidate the pages list so the strip updates
+      ref.invalidate(pagesForChapterProvider);
+
+      if (mounted) {
+        _switchToPage(newPageId, drawingService);
+      }
+    } catch (e) {
+      debugPrint('Failed to create new page: $e');
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -545,6 +759,30 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       }
     } catch (e) {
       debugPrint('Failed to delete strokes: $e');
+    }
+  }
+
+  /// Persist current page settings (grid style, spacing, paper color) to SQLite.
+  ///
+  /// Fire-and-forget — called when the user changes any visual setting
+  /// via the floating palette.
+  Future<void> _persistPageSettings() async {
+    try {
+      final dbAsync = ref.read(databaseServiceProvider);
+      final db = dbAsync.valueOrNull;
+      if (db != null) {
+        final page = SketchPage(
+          id: _pageId,
+          chapterId: defaultChapterId,
+          pageNumber: 0,
+          style: _gridStyle.toPageStyle(),
+          gridConfig: GridConfig(spacing: _gridSpacing),
+          paperColor: _paperColor.toARGB32(),
+        );
+        await db.updatePageSettings(page);
+      }
+    } catch (e) {
+      debugPrint('Failed to persist page settings: $e');
     }
   }
 }

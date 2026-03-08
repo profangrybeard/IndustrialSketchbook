@@ -42,8 +42,9 @@ class DatabaseService {
 
     _db = await openDatabase(
       dbPath,
-      version: 1,
+      version: 2,
       onCreate: _onCreate,
+      onUpgrade: _onUpgrade,
       onConfigure: (db) async {
         // Enable WAL mode for better concurrent read/write performance
         // Use rawQuery because journal_mode returns a result set
@@ -52,6 +53,16 @@ class DatabaseService {
         await db.execute('PRAGMA foreign_keys=ON');
       },
     );
+  }
+
+  /// Migrate schema between versions.
+  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      // v2: Add paper_color column to pages table (Layer 2 — page settings)
+      await db.execute(
+        'ALTER TABLE pages ADD COLUMN paper_color INTEGER NOT NULL DEFAULT ${0xFFF5F5F0}',
+      );
+    }
   }
 
   /// Create all tables (TDD Appendix A).
@@ -92,6 +103,7 @@ class DatabaseService {
         branch_point_stroke_id TEXT,
         branch_page_ids_json TEXT NOT NULL DEFAULT '[]',
         layer_ids_json TEXT NOT NULL DEFAULT '["default"]',
+        paper_color INTEGER NOT NULL DEFAULT ${0xFFF5F5F0},
         FOREIGN KEY (chapter_id) REFERENCES chapters(id)
       )
     ''');
@@ -273,6 +285,77 @@ class DatabaseService {
       orderBy: 'page_number ASC',
     );
     return rows.map(SketchPage.fromDbMap).toList();
+  }
+
+  /// Get the number of pages in a chapter.
+  ///
+  /// Used for assigning pageNumber to new pages and for "Page X of Y" display.
+  Future<int> getPageCount(String chapterId) async {
+    final result = Sqflite.firstIntValue(await db.rawQuery(
+      'SELECT COUNT(*) FROM pages WHERE chapter_id = ?',
+      [chapterId],
+    ));
+    return result ?? 0;
+  }
+
+  /// Delete a page and all its associated data (strokes, stroke order).
+  ///
+  /// Cascade-deletes in a single transaction to maintain referential integrity.
+  /// Returns false if this is the last page in its chapter (safety guard —
+  /// a chapter must always have at least one page).
+  Future<bool> deletePage(String pageId) async {
+    // Look up the page to find its chapter
+    final page = await getPage(pageId);
+    if (page == null) return false;
+
+    // Safety: don't delete the last page in a chapter
+    final count = await getPageCount(page.chapterId);
+    if (count <= 1) return false;
+
+    await db.transaction((txn) async {
+      // 1. Remove stroke ordering entries
+      await txn.delete(
+        'page_stroke_order',
+        where: 'page_id = ?',
+        whereArgs: [pageId],
+      );
+
+      // 2. Remove strokes belonging to this page
+      await txn.delete(
+        'strokes',
+        where: 'page_id = ?',
+        whereArgs: [pageId],
+      );
+
+      // 3. Remove the page record
+      await txn.delete(
+        'pages',
+        where: 'id = ?',
+        whereArgs: [pageId],
+      );
+    });
+
+    return true;
+  }
+
+  /// Update page visual settings (style, grid config, paper color).
+  ///
+  /// Called when the user changes grid style, spacing, or paper color
+  /// via the floating palette. Only updates the settings columns —
+  /// does not touch structural fields (chapterId, branches, etc.).
+  Future<void> updatePageSettings(SketchPage page) async {
+    await db.update(
+      'pages',
+      {
+        'style': page.style.toJson(),
+        'grid_config_json': page.gridConfig != null
+            ? jsonEncode(page.gridConfig!.toJson())
+            : null,
+        'paper_color': page.paperColor,
+      },
+      where: 'id = ?',
+      whereArgs: [page.id],
+    );
   }
 
   // ---------------------------------------------------------------------------
