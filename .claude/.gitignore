@@ -1,0 +1,2 @@
+# Worktrees are temporary git artifacts — don't version them
+worktrees/
