@@ -50,7 +50,7 @@ class Stroke {
   /// Set to true after cloud acknowledgement.
   final bool synced;
 
-  const Stroke({
+  Stroke({
     required this.id,
     required this.pageId,
     this.layerId = 'default',
@@ -67,9 +67,13 @@ class Stroke {
 
   /// The bounding rectangle of all points, inflated by weight/2 on all sides.
   ///
-  /// This is used for dirty region tracking (TDD §4.1) and hit testing.
+  /// Cached on first access. Only valid for committed strokes (where points
+  /// are frozen). Used for dirty region tracking (TDD §4.1) and hit testing.
   /// Test DRW-002 validates this computation.
-  Rect get boundingRect {
+  Rect get boundingRect => _cachedBoundingRect ??= _computeBoundingRect();
+  Rect? _cachedBoundingRect;
+
+  Rect _computeBoundingRect() {
     if (points.isEmpty) return Rect.zero;
 
     double minX = points[0].x;
