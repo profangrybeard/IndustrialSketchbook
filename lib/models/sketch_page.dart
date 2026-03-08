@@ -53,6 +53,10 @@ class SketchPage {
   /// Page layers. Default: ["default"]. Length >= 1.
   final List<String> layerIds;
 
+  /// Paper background color as ARGB packed integer.
+  /// Default: 0xFFF5F5F0 (warm white / light cream).
+  final int paperColor;
+
   const SketchPage({
     required this.id,
     required this.chapterId,
@@ -66,6 +70,7 @@ class SketchPage {
     this.branchPointStrokeId,
     this.branchPageIds = const [],
     this.layerIds = const ['default'],
+    this.paperColor = 0xFFF5F5F0,
   });
 
   /// Create a copy with updated fields.
@@ -78,6 +83,7 @@ class SketchPage {
     List<ImageRef>? attachments,
     List<String>? branchPageIds,
     List<String>? layerIds,
+    int? paperColor,
   }) {
     return SketchPage(
       id: id,
@@ -92,6 +98,7 @@ class SketchPage {
       branchPointStrokeId: branchPointStrokeId,
       branchPageIds: branchPageIds ?? this.branchPageIds,
       layerIds: layerIds ?? this.layerIds,
+      paperColor: paperColor ?? this.paperColor,
     );
   }
 
@@ -108,6 +115,7 @@ class SketchPage {
         'branchPointStrokeId': branchPointStrokeId,
         'branchPageIds': branchPageIds,
         'layerIds': layerIds,
+        'paperColor': paperColor,
       };
 
   factory SketchPage.fromJson(Map<String, dynamic> json) => SketchPage(
@@ -132,6 +140,7 @@ class SketchPage {
         branchPageIds:
             (json['branchPageIds'] as List?)?.cast<String>() ?? [],
         layerIds: (json['layerIds'] as List?)?.cast<String>() ?? ['default'],
+        paperColor: json['paperColor'] as int? ?? 0xFFF5F5F0,
       );
 
   /// Convert to SQLite row map.
@@ -149,6 +158,7 @@ class SketchPage {
         'branch_point_stroke_id': branchPointStrokeId,
         'branch_page_ids_json': jsonEncode(branchPageIds),
         'layer_ids_json': jsonEncode(layerIds),
+        'paper_color': paperColor,
       };
 
   /// Reconstruct from a SQLite row map.
@@ -177,6 +187,7 @@ class SketchPage {
             ? (jsonDecode(map['layer_ids_json'] as String) as List)
                 .cast<String>()
             : ['default'],
+        paperColor: map['paper_color'] as int? ?? 0xFFF5F5F0,
       );
 
   @override

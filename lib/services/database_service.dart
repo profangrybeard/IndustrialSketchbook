@@ -42,8 +42,9 @@ class DatabaseService {
 
     _db = await openDatabase(
       dbPath,
-      version: 1,
+      version: 2,
       onCreate: _onCreate,
+      onUpgrade: _onUpgrade,
       onConfigure: (db) async {
         // Enable WAL mode for better concurrent read/write performance
         // Use rawQuery because journal_mode returns a result set
@@ -52,6 +53,16 @@ class DatabaseService {
         await db.execute('PRAGMA foreign_keys=ON');
       },
     );
+  }
+
+  /// Migrate schema between versions.
+  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      // v2: Add paper_color column to pages table (Layer 2 — page settings)
+      await db.execute(
+        'ALTER TABLE pages ADD COLUMN paper_color INTEGER NOT NULL DEFAULT ${0xFFF5F5F0}',
+      );
+    }
   }
 
   /// Create all tables (TDD Appendix A).
@@ -92,6 +103,7 @@ class DatabaseService {
         branch_point_stroke_id TEXT,
         branch_page_ids_json TEXT NOT NULL DEFAULT '[]',
         layer_ids_json TEXT NOT NULL DEFAULT '["default"]',
+        paper_color INTEGER NOT NULL DEFAULT ${0xFFF5F5F0},
         FOREIGN KEY (chapter_id) REFERENCES chapters(id)
       )
     ''');
@@ -273,6 +285,26 @@ class DatabaseService {
       orderBy: 'page_number ASC',
     );
     return rows.map(SketchPage.fromDbMap).toList();
+  }
+
+  /// Update page visual settings (style, grid config, paper color).
+  ///
+  /// Called when the user changes grid style, spacing, or paper color
+  /// via the floating palette. Only updates the settings columns —
+  /// does not touch structural fields (chapterId, branches, etc.).
+  Future<void> updatePageSettings(SketchPage page) async {
+    await db.update(
+      'pages',
+      {
+        'style': page.style.toJson(),
+        'grid_config_json': page.gridConfig != null
+            ? jsonEncode(page.gridConfig!.toJson())
+            : null,
+        'paper_color': page.paperColor,
+      },
+      where: 'id = ?',
+      whereArgs: [page.id],
+    );
   }
 
   // ---------------------------------------------------------------------------

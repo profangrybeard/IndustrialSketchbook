@@ -6,7 +6,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/eraser_mode.dart';
+import '../models/grid_config.dart';
 import '../models/grid_style.dart';
+import '../models/page_style.dart';
+import '../models/sketch_page.dart';
 import '../models/stroke.dart';
 import '../models/stroke_point.dart';
 import '../models/tool_type.dart';
@@ -91,9 +94,9 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
     final drawingService = ref.watch(drawingServiceProvider);
     final hitRadius = drawingService.currentWeight * 2.0;
 
-    // --- Stroke recall: load persisted strokes on first build ---
+    // --- Page recall: load persisted strokes + page settings on first build ---
     // The database provider is async (FutureProvider). When it resolves,
-    // load all strokes for the current page into the drawing service.
+    // load all strokes and page settings for the current page.
     // This runs once per page — _strokesLoaded prevents re-loading.
     if (!_strokesLoaded) {
       final dbAsync = ref.watch(databaseServiceProvider);
@@ -102,9 +105,22 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
         // Schedule after this build frame to avoid setState-during-build
         // (loadStrokes calls notifyListeners which triggers rebuild)
         Future.microtask(() async {
+          if (!mounted) return;
+
+          // Load strokes
           final strokes = await db.getStrokesByPageId(_pageId);
           if (mounted && strokes.isNotEmpty) {
             drawingService.loadStrokes(strokes);
+          }
+
+          // Load page settings (grid style, spacing, paper color)
+          final page = await db.getPage(_pageId);
+          if (mounted && page != null) {
+            setState(() {
+              _gridStyle = GridStyle.fromPageStyle(page.style);
+              _gridSpacing = page.gridConfig?.spacing ?? 25.0;
+              _paperColor = Color(page.paperColor);
+            });
           }
         });
       });
@@ -202,11 +218,18 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
                 setState(() => _eraserCursorPosition = null);
               }
             },
-            onGridStyleChanged: (style) =>
-                setState(() => _gridStyle = style),
-            onGridSpacingChanged: (v) => setState(() => _gridSpacing = v),
-            onPaperColorChanged: (color) =>
-                setState(() => _paperColor = color),
+            onGridStyleChanged: (style) {
+              setState(() => _gridStyle = style);
+              _persistPageSettings();
+            },
+            onGridSpacingChanged: (v) {
+              setState(() => _gridSpacing = v);
+              _persistPageSettings();
+            },
+            onPaperColorChanged: (color) {
+              setState(() => _paperColor = color);
+              _persistPageSettings();
+            },
             onPressureModeChanged: (mode) =>
                 drawingService.pressureMode = mode,
             onPressureCurveChanged: (curve) =>
@@ -638,6 +661,30 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       }
     } catch (e) {
       debugPrint('Failed to delete strokes: $e');
+    }
+  }
+
+  /// Persist current page settings (grid style, spacing, paper color) to SQLite.
+  ///
+  /// Fire-and-forget — called when the user changes any visual setting
+  /// via the floating palette.
+  Future<void> _persistPageSettings() async {
+    try {
+      final dbAsync = ref.read(databaseServiceProvider);
+      final db = dbAsync.valueOrNull;
+      if (db != null) {
+        final page = SketchPage(
+          id: _pageId,
+          chapterId: defaultChapterId,
+          pageNumber: 0,
+          style: _gridStyle.toPageStyle(),
+          gridConfig: GridConfig(spacing: _gridSpacing),
+          paperColor: _paperColor.toARGB32(),
+        );
+        await db.updatePageSettings(page);
+      }
+    } catch (e) {
+      debugPrint('Failed to persist page settings: $e');
     }
   }
 }
