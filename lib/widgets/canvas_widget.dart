@@ -44,6 +44,10 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   /// Whether a stylus/pen is currently active (for palm rejection).
   bool _penActive = false;
 
+  /// Whether strokes have been loaded from the database for the current page.
+  /// Prevents re-loading on every widget rebuild.
+  bool _strokesLoaded = false;
+
   /// The page ID for strokes. Using a fixed default page for Phase 2.
   final String _pageId = 'default-page';
 
@@ -86,6 +90,25 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   Widget build(BuildContext context) {
     final drawingService = ref.watch(drawingServiceProvider);
     final hitRadius = drawingService.currentWeight * 2.0;
+
+    // --- Stroke recall: load persisted strokes on first build ---
+    // The database provider is async (FutureProvider). When it resolves,
+    // load all strokes for the current page into the drawing service.
+    // This runs once per page — _strokesLoaded prevents re-loading.
+    if (!_strokesLoaded) {
+      final dbAsync = ref.watch(databaseServiceProvider);
+      dbAsync.whenData((db) {
+        _strokesLoaded = true;
+        // Schedule after this build frame to avoid setState-during-build
+        // (loadStrokes calls notifyListeners which triggers rebuild)
+        Future.microtask(() async {
+          final strokes = await db.getStrokesByPageId(_pageId);
+          if (mounted && strokes.isNotEmpty) {
+            drawingService.loadStrokes(strokes);
+          }
+        });
+      });
+    }
 
     return Scaffold(
       body: Stack(
