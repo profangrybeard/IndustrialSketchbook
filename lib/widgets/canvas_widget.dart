@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
+import '../models/chapter.dart';
 import '../models/eraser_mode.dart';
 import '../models/grid_config.dart';
 import '../models/grid_style.dart';
@@ -243,36 +244,67 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
             onClear: () => _handleClear(drawingService),
           ),
 
-          // Developer overlay + page navigation — both need page list data
+          // Developer overlay + page navigation — global page list (Layer 4b)
           Builder(builder: (context) {
-            final pagesAsync = ref.watch(pagesForChapterProvider);
+            final globalPagesAsync = ref.watch(globalPageListProvider);
             final currentPageId = ref.watch(currentPageIdProvider);
-            return pagesAsync.when(
-              data: (pages) {
-                final currentIndex =
-                    pages.indexWhere((p) => p.id == currentPageId);
-                final safeIndex = currentIndex >= 0 ? currentIndex : 0;
+            return globalPagesAsync.when(
+              data: (globalPages) {
+                if (globalPages.isEmpty) {
+                  return DeveloperOverlay(drawingService: drawingService);
+                }
+
+                final currentGlobalIndex = globalPages
+                    .indexWhere((e) => e.page.id == currentPageId);
+                final safeIndex =
+                    currentGlobalIndex >= 0 ? currentGlobalIndex : 0;
+                final currentEntry = globalPages[safeIndex];
+
+                // Auto-sync currentChapterIdProvider when navigating
+                // across chapter boundaries.
+                final currentChapterId =
+                    ref.read(currentChapterIdProvider);
+                if (currentEntry.chapterId != currentChapterId) {
+                  Future.microtask(() {
+                    if (mounted) {
+                      ref
+                          .read(currentChapterIdProvider.notifier)
+                          .state = currentEntry.chapterId;
+                    }
+                  });
+                }
+
                 return Stack(
                   children: [
                     // Developer overlay (Phase 2.8.1)
                     DeveloperOverlay(
                       drawingService: drawingService,
                       currentPageIndex: safeIndex,
-                      totalPages: pages.length,
+                      totalPages: globalPages.length,
+                      chapterIndex: currentEntry.chapterIndex,
+                      totalChapters: currentEntry.totalChapters,
                     ),
-                    // Page navigation strip (Layer 3)
+                    // Page navigation strip (Layer 4b)
                     PageStrip(
                       currentPage: safeIndex,
-                      totalPages: pages.length,
+                      totalPages: globalPages.length,
+                      chapterTitle: currentEntry.chapterTitle,
+                      chapterColor: currentEntry.chapterColor,
+                      chapterIndex: currentEntry.chapterIndex,
+                      totalChapters: currentEntry.totalChapters,
                       onPrevPage: safeIndex > 0
                           ? () => _switchToPage(
-                                pages[safeIndex - 1].id, drawingService)
+                                globalPages[safeIndex - 1].page.id,
+                                drawingService)
                           : null,
-                      onNextPage: safeIndex < pages.length - 1
+                      onNextPage: safeIndex < globalPages.length - 1
                           ? () => _switchToPage(
-                                pages[safeIndex + 1].id, drawingService)
+                                globalPages[safeIndex + 1].page.id,
+                                drawingService)
                           : null,
                       onNewPage: () => _createNewPage(drawingService),
+                      onNewChapter: () =>
+                          _createNewChapter(drawingService),
                     ),
                   ],
                 );
@@ -689,14 +721,58 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
         pageNumber: pageCount,
       ));
 
-      // Invalidate the pages list so the strip updates
+      // Invalidate the pages lists so the strip updates
       ref.invalidate(pagesForChapterProvider);
+      ref.invalidate(globalPageListProvider);
 
       if (mounted) {
         _switchToPage(newPageId, drawingService);
       }
     } catch (e) {
       debugPrint('Failed to create new page: $e');
+    }
+  }
+
+  /// Create a new chapter at the end of the notebook with one blank page,
+  /// then navigate to that page.
+  Future<void> _createNewChapter(DrawingService drawingService) async {
+    try {
+      final dbAsync = ref.read(databaseServiceProvider);
+      final db = dbAsync.valueOrNull;
+      if (db == null) return;
+
+      final chapterCount = await db.getChapterCount(defaultNotebookId);
+      final newChapterId = _uuid.v4();
+      final newPageId = _uuid.v4();
+
+      // Insert chapter at the end
+      await db.insertChapter(Chapter(
+        id: newChapterId,
+        notebookId: defaultNotebookId,
+        title: 'Chapter ${chapterCount + 1}',
+        order: chapterCount,
+      ));
+
+      // Insert one blank page in the new chapter
+      await db.insertPage(SketchPage(
+        id: newPageId,
+        chapterId: newChapterId,
+        pageNumber: 0,
+      ));
+
+      // Update current chapter
+      ref.read(currentChapterIdProvider.notifier).state = newChapterId;
+
+      // Invalidate providers so they reload
+      ref.invalidate(globalPageListProvider);
+      ref.invalidate(chaptersProvider);
+      ref.invalidate(pagesForChapterProvider);
+
+      if (mounted) {
+        _switchToPage(newPageId, drawingService);
+      }
+    } catch (e) {
+      debugPrint('Failed to create new chapter: $e');
     }
   }
 

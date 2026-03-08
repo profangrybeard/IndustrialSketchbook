@@ -1,25 +1,45 @@
 import 'package:flutter/material.dart';
 
-/// Minimal page navigation bar (Layer 3).
+/// Page navigation bar with chapter context (Layer 4b).
 ///
-/// Shows current page position, prev/next buttons, and a new-page button.
+/// Shows global page position, chapter name with accent color,
+/// prev/next buttons that cross chapter boundaries, and buttons
+/// for creating new pages and chapters.
+///
 /// Positioned at bottom-center of the canvas, away from the floating
 /// palette (left/right edges) and developer overlay (top-left).
 class PageStrip extends StatelessWidget {
   const PageStrip({
     required this.currentPage,
     required this.totalPages,
+    required this.chapterTitle,
+    required this.chapterColor,
+    required this.chapterIndex,
+    required this.totalChapters,
     required this.onNewPage,
+    required this.onNewChapter,
     this.onPrevPage,
     this.onNextPage,
     super.key,
   });
 
-  /// Zero-based index of the current page.
+  /// Zero-based global index of the current page (across all chapters).
   final int currentPage;
 
-  /// Total number of pages in the chapter.
+  /// Total number of pages across all chapters.
   final int totalPages;
+
+  /// Title of the chapter containing the current page.
+  final String chapterTitle;
+
+  /// ARGB accent color of the current chapter.
+  final int chapterColor;
+
+  /// Zero-based index of the current chapter.
+  final int chapterIndex;
+
+  /// Total number of chapters in the notebook.
+  final int totalChapters;
 
   /// Navigate to the previous page (null = at first page, button disabled).
   final VoidCallback? onPrevPage;
@@ -27,11 +47,23 @@ class PageStrip extends StatelessWidget {
   /// Navigate to the next page (null = at last page, button disabled).
   final VoidCallback? onNextPage;
 
-  /// Create a new blank page and switch to it.
+  /// Create a new blank page in the current chapter.
   final VoidCallback onNewPage;
+
+  /// Create a new chapter with one blank page.
+  final VoidCallback onNewChapter;
+
+  static const _labelStyle = TextStyle(
+    color: Color.fromRGBO(255, 255, 255, 0.85),
+    fontSize: 12,
+    fontFamily: 'monospace',
+    fontWeight: FontWeight.w500,
+  );
 
   @override
   Widget build(BuildContext context) {
+    final accentColor = Color(chapterColor);
+
     return Positioned(
       bottom: 12,
       left: 0,
@@ -46,28 +78,23 @@ class PageStrip extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Previous page
+              // Previous page (crosses chapter boundaries)
               _stripButton(
                 icon: Icons.chevron_left,
                 onPressed: onPrevPage,
                 tooltip: 'Previous page',
               ),
 
-              // Page indicator
+              // Global page indicator
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 8),
                 child: Text(
                   'Page ${currentPage + 1} / $totalPages',
-                  style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.85),
-                    fontSize: 12,
-                    fontFamily: 'monospace',
-                    fontWeight: FontWeight.w500,
-                  ),
+                  style: _labelStyle,
                 ),
               ),
 
-              // Next page
+              // Next page (crosses chapter boundaries)
               _stripButton(
                 icon: Icons.chevron_right,
                 onPressed: onNextPage,
@@ -75,23 +102,69 @@ class PageStrip extends StatelessWidget {
               ),
 
               // Divider
+              _verticalDivider(),
+
+              // Chapter context: colored dot + title + ch M/N
               Container(
-                width: 1,
-                height: 20,
-                margin: const EdgeInsets.symmetric(horizontal: 4),
-                color: Colors.white.withValues(alpha: 0.2),
+                width: 8,
+                height: 8,
+                margin: const EdgeInsets.only(right: 6),
+                decoration: BoxDecoration(
+                  color: accentColor,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.only(right: 4),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 120),
+                  child: Text(
+                    chapterTitle,
+                    style: _labelStyle,
+                    overflow: TextOverflow.ellipsis,
+                    maxLines: 1,
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.only(right: 4),
+                child: Text(
+                  'ch ${chapterIndex + 1}/$totalChapters',
+                  style: _labelStyle.copyWith(
+                    color: const Color.fromRGBO(255, 255, 255, 0.5),
+                  ),
+                ),
               ),
 
-              // New page
+              // Divider
+              _verticalDivider(),
+
+              // New page (in current chapter)
               _stripButton(
                 icon: Icons.add,
                 onPressed: onNewPage,
                 tooltip: 'New page',
               ),
+
+              // New chapter
+              _stripButton(
+                icon: Icons.bookmark_add,
+                onPressed: onNewChapter,
+                tooltip: 'New chapter',
+              ),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  Widget _verticalDivider() {
+    return Container(
+      width: 1,
+      height: 20,
+      margin: const EdgeInsets.symmetric(horizontal: 4),
+      color: const Color.fromRGBO(255, 255, 255, 0.2),
     );
   }
 
@@ -110,8 +183,8 @@ class PageStrip extends StatelessWidget {
         padding: EdgeInsets.zero,
         constraints: const BoxConstraints(),
         color: enabled
-            ? Colors.white.withValues(alpha: 0.85)
-            : Colors.white.withValues(alpha: 0.25),
+            ? const Color.fromRGBO(255, 255, 255, 0.85)
+            : const Color.fromRGBO(255, 255, 255, 0.25),
         onPressed: onPressed,
         tooltip: tooltip,
       ),
