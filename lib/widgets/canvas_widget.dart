@@ -679,12 +679,13 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       final db = dbAsync.valueOrNull;
       if (db == null) return;
 
-      final pageCount = await db.getPageCount(defaultChapterId);
+      final chapterId = ref.read(currentChapterIdProvider);
+      final pageCount = await db.getPageCount(chapterId);
       final newPageId = _uuid.v4();
 
       await db.insertPage(SketchPage(
         id: newPageId,
-        chapterId: defaultChapterId,
+        chapterId: chapterId,
         pageNumber: pageCount,
       ));
 
@@ -773,7 +774,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       if (db != null) {
         final page = SketchPage(
           id: _pageId,
-          chapterId: defaultChapterId,
+          chapterId: ref.read(currentChapterIdProvider),
           pageNumber: 0,
           style: _gridStyle.toPageStyle(),
           gridConfig: GridConfig(spacing: _gridSpacing),

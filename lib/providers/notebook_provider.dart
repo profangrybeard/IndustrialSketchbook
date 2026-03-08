@@ -34,10 +34,20 @@ final chaptersProvider = FutureProvider<List<Chapter>>((ref) async {
 /// Initialized to [defaultPageId] (the seeded first page).
 final currentPageIdProvider = StateProvider<String>((ref) => defaultPageId);
 
-/// Provides all pages for the default chapter, ordered by pageNumber.
+/// Tracks the current chapter.
+///
+/// Updated automatically when navigating between pages — derived from
+/// whichever chapter contains the current page. Also used by
+/// `_createNewPage()` to insert into the correct chapter.
+final currentChapterIdProvider =
+    StateProvider<String>((ref) => defaultChapterId);
+
+/// Provides all pages for the current chapter, ordered by pageNumber.
 ///
 /// Used by the page strip to show "Page X of Y" and for navigation.
+/// Watches [currentChapterIdProvider] so it refreshes on chapter change.
 final pagesForChapterProvider = FutureProvider<List<SketchPage>>((ref) async {
+  final chapterId = ref.watch(currentChapterIdProvider);
   final db = await ref.watch(databaseServiceProvider.future);
-  return db.getPagesByChapter(defaultChapterId);
+  return db.getPagesByChapter(chapterId);
 });

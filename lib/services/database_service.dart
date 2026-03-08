@@ -262,6 +262,150 @@ class DatabaseService {
     return rows.map(Chapter.fromDbMap).toList();
   }
 
+  /// Update a chapter's title, color, and sort_order.
+  Future<void> updateChapter(Chapter chapter) async {
+    await db.update(
+      'chapters',
+      {
+        'title': chapter.title,
+        'color': chapter.color,
+        'sort_order': chapter.order,
+      },
+      where: 'id = ?',
+      whereArgs: [chapter.id],
+    );
+  }
+
+  /// Delete a chapter and cascade-remove all its pages, strokes, and stroke
+  /// order entries.
+  ///
+  /// Safety guard: cannot delete the last chapter in a notebook.
+  /// Returns false if the chapter doesn't exist or is the last one.
+  Future<bool> deleteChapter(String chapterId) async {
+    final chapter = await getChapter(chapterId);
+    if (chapter == null) return false;
+
+    // Safety: don't delete the last chapter in the notebook
+    final count = await getChapterCount(chapter.notebookId);
+    if (count <= 1) return false;
+
+    await db.transaction((txn) async {
+      // Get all pages in this chapter
+      final pageRows = await txn.query(
+        'pages',
+        columns: ['id'],
+        where: 'chapter_id = ?',
+        whereArgs: [chapterId],
+      );
+
+      // For each page: delete stroke_order, delete strokes
+      for (final row in pageRows) {
+        final pageId = row['id'] as String;
+        await txn.delete(
+          'page_stroke_order',
+          where: 'page_id = ?',
+          whereArgs: [pageId],
+        );
+        await txn.delete(
+          'strokes',
+          where: 'page_id = ?',
+          whereArgs: [pageId],
+        );
+      }
+
+      // Delete all pages in the chapter
+      await txn.delete(
+        'pages',
+        where: 'chapter_id = ?',
+        whereArgs: [chapterId],
+      );
+
+      // Delete the chapter record
+      await txn.delete(
+        'chapters',
+        where: 'id = ?',
+        whereArgs: [chapterId],
+      );
+    });
+
+    return true;
+  }
+
+  /// Bulk-update sort_order for chapters based on list position.
+  ///
+  /// The first ID in [chapterIds] gets sort_order 0, the second gets 1, etc.
+  Future<void> reorderChapters(List<String> chapterIds) async {
+    await db.transaction((txn) async {
+      for (int i = 0; i < chapterIds.length; i++) {
+        await txn.update(
+          'chapters',
+          {'sort_order': i},
+          where: 'id = ?',
+          whereArgs: [chapterIds[i]],
+        );
+      }
+    });
+  }
+
+  /// Move a page to a different chapter at a specific position.
+  ///
+  /// Re-numbers both the source and target chapters so page numbers
+  /// remain contiguous (no gaps).
+  Future<void> movePageToChapter(
+    String pageId,
+    String targetChapterId,
+    int targetPageNumber,
+  ) async {
+    await db.transaction((txn) async {
+      // 1. Get the page's current location
+      final pageRows = await txn.query(
+        'pages',
+        where: 'id = ?',
+        whereArgs: [pageId],
+      );
+      if (pageRows.isEmpty) return;
+      final oldChapterId = pageRows.first['chapter_id'] as String;
+      final oldPageNumber = pageRows.first['page_number'] as int;
+
+      // 2. Remove from old chapter: shift down page_numbers above the gap
+      await txn.rawUpdate(
+        'UPDATE pages SET page_number = page_number - 1 '
+        'WHERE chapter_id = ? AND page_number > ?',
+        [oldChapterId, oldPageNumber],
+      );
+
+      // 3. Make room in new chapter: shift up page_numbers at or above target
+      await txn.rawUpdate(
+        'UPDATE pages SET page_number = page_number + 1 '
+        'WHERE chapter_id = ? AND page_number >= ?',
+        [targetChapterId, targetPageNumber],
+      );
+
+      // 4. Update the page's chapter and position
+      await txn.update(
+        'pages',
+        {
+          'chapter_id': targetChapterId,
+          'page_number': targetPageNumber,
+        },
+        where: 'id = ?',
+        whereArgs: [pageId],
+      );
+    });
+  }
+
+  /// Get the number of chapters in a notebook.
+  ///
+  /// Used for the "cannot delete last chapter" safety guard and for
+  /// "Chapter X of Y" display.
+  Future<int> getChapterCount(String notebookId) async {
+    final result = Sqflite.firstIntValue(await db.rawQuery(
+      'SELECT COUNT(*) FROM chapters WHERE notebook_id = ?',
+      [notebookId],
+    ));
+    return result ?? 0;
+  }
+
   // ---------------------------------------------------------------------------
   // Page CRUD
   // ---------------------------------------------------------------------------
