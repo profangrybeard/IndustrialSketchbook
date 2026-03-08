@@ -33,6 +33,10 @@ class SketchPainter extends CustomPainter {
     this.erasedStrokeIds = const {},
     this.pressureMode = PressureMode.width,
     this.grainIntensity = 0.25,
+    this.pressureExponent = 1.8,
+    this.eraserCursorPosition,
+    this.eraserRadius = 20.0,
+    this.showEraserCursor = false,
   });
 
   /// Default paper background color.
@@ -83,6 +87,20 @@ class SketchPainter extends CustomPainter {
   /// Controlled by the active PencilLead preset.
   final double grainIntensity;
 
+  /// Power-curve exponent for pencil pressure mapping.
+  /// Controlled by the active [PressureCurve] preset.
+  /// Default 1.8 matches Phase 2.6 "natural" behavior.
+  final double pressureExponent;
+
+  /// Current eraser cursor position (null when eraser is not active).
+  final Offset? eraserCursorPosition;
+
+  /// Eraser hit radius in logical pixels.
+  final double eraserRadius;
+
+  /// Whether to draw the dashed eraser cursor circle.
+  final bool showEraserCursor;
+
   @override
   void paint(Canvas canvas, Size size) {
     // Draw paper background + grid overlay
@@ -99,6 +117,38 @@ class SketchPainter extends CustomPainter {
     final inflight = inflightStroke;
     if (inflight != null) {
       _drawStroke(canvas, inflight);
+    }
+
+    // Draw eraser cursor overlay (on top of everything)
+    if (showEraserCursor && eraserCursorPosition != null) {
+      _drawEraserCursor(canvas);
+    }
+  }
+
+  /// Draw a dashed circle at the eraser cursor position.
+  ///
+  /// Uses 16 arc segments with 30% gaps — subtle enough to not distract
+  /// while drawing, visible enough to show the eraser's hit area.
+  void _drawEraserCursor(Canvas canvas) {
+    final cursorPos = eraserCursorPosition;
+    if (cursorPos == null) return;
+
+    final paint = Paint()
+      ..color = const Color(0x66888888) // semi-transparent gray
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5
+      ..isAntiAlias = true;
+
+    // Dashed circle: 16 arc segments with 30% gap between each
+    const segments = 16;
+    const gapFraction = 0.3;
+    const arcPerSegment = (2 * math.pi) / segments;
+    const drawArc = arcPerSegment * (1 - gapFraction);
+
+    final rect = Rect.fromCircle(center: cursorPos, radius: eraserRadius);
+    for (int i = 0; i < segments; i++) {
+      final startAngle = i * arcPerSegment;
+      canvas.drawArc(rect, startAngle, drawArc, false, paint);
     }
   }
 
@@ -171,11 +221,13 @@ class SketchPainter extends CustomPainter {
   /// Non-linear pressure curve for pencil — light touches stay very light,
   /// heavy pressure gives bold marks. Gives the "resistance" feel of graphite.
   ///
-  /// Exponent 1.8: at 0.5 pressure → ~0.29 effective (subtle).
-  /// At 0.8 pressure → ~0.67 effective (medium mark).
-  /// At 1.0 pressure → 1.0 (full).
-  static double pencilPressure(double rawPressure) {
-    return math.pow(rawPressure.clamp(0.0, 1.0), 1.8).toDouble();
+  /// The [exponent] controls curve shape:
+  /// - 1.0 = linear (no curve)
+  /// - 1.4 = light resistance
+  /// - 1.8 = natural graphite feel (default, Phase 2.6 behavior)
+  /// - 2.5 = heavy resistance
+  static double pencilPressure(double rawPressure, {double exponent = 1.8}) {
+    return math.pow(rawPressure.clamp(0.0, 1.0), exponent).toDouble();
   }
 
   /// Tilt-based width multiplier — tilting the stylus sideways widens the
@@ -265,8 +317,9 @@ class SketchPainter extends CustomPainter {
     // Single-point stroke: draw a filled circle (tap/dot)
     if (points.length == 1) {
       final p = points.first;
-      final effectivePressure =
-          isPencil ? pencilPressure(p.pressure) : p.pressure;
+      final effectivePressure = isPencil
+          ? pencilPressure(p.pressure, exponent: pressureExponent)
+          : p.pressure;
       final radius =
           stroke.weight * math.max(effectivePressure, 0.1) / 2.0;
 
@@ -333,7 +386,7 @@ class SketchPainter extends CustomPainter {
 
       // --- Pressure ---
       final avgRawPressure = (p0.pressure + p1.pressure) / 2.0;
-      final pencilP = pencilPressure(avgRawPressure);
+      final pencilP = pencilPressure(avgRawPressure, exponent: pressureExponent);
 
       // --- Tilt ---
       final avgTiltX = (p0.tiltX + p1.tiltX) / 2.0;

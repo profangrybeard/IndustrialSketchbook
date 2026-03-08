@@ -2,11 +2,14 @@ import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
 
+import '../models/eraser_mode.dart';
 import '../models/pencil_lead.dart';
+import '../models/pressure_curve.dart';
 import '../models/pressure_mode.dart';
 import '../models/stroke.dart';
 import '../models/stroke_point.dart';
 import '../models/tool_type.dart';
+import '../models/undo_action.dart';
 
 /// Drawing Pipeline (TDD §4.1).
 ///
@@ -84,7 +87,7 @@ class DrawingService extends ChangeNotifier {
   }
 
   // ---------------------------------------------------------------------------
-  // Pressure mode
+  // Pressure mode & curve
   // ---------------------------------------------------------------------------
 
   /// How stylus pressure affects pencil rendering.
@@ -95,6 +98,86 @@ class DrawingService extends ChangeNotifier {
       _pressureMode = value;
       notifyListeners();
     }
+  }
+
+  /// Pressure curve preset for pencil rendering.
+  PressureCurve _pressureCurve = PressureCurve.natural;
+  PressureCurve get pressureCurve => _pressureCurve;
+  set pressureCurve(PressureCurve value) {
+    if (_pressureCurve != value) {
+      _pressureCurve = value;
+      notifyListeners();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Eraser mode
+  // ---------------------------------------------------------------------------
+
+  /// How the eraser removes strokes (standard partial or history-based).
+  EraserMode _eraserMode = EraserMode.standard;
+  EraserMode get eraserMode => _eraserMode;
+  set eraserMode(EraserMode value) {
+    if (_eraserMode != value) {
+      _eraserMode = value;
+      notifyListeners();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Undo / Redo
+  // ---------------------------------------------------------------------------
+
+  /// Maximum number of undo actions to retain.
+  static const int maxUndoStack = 50;
+
+  final List<UndoAction> _undoStack = [];
+  final List<UndoAction> _redoStack = [];
+
+  /// Whether an undo operation is available.
+  bool get canUndo => _undoStack.isNotEmpty;
+
+  /// Whether a redo operation is available.
+  bool get canRedo => _redoStack.isNotEmpty;
+
+  /// Record an undoable action. Clears the redo stack (new action
+  /// invalidates any previously undone operations).
+  void pushUndoAction(UndoAction action) {
+    _undoStack.add(action);
+    if (_undoStack.length > maxUndoStack) {
+      _undoStack.removeAt(0); // drop oldest
+    }
+    _redoStack.clear();
+    notifyListeners();
+  }
+
+  /// Pop the most recent undo action and move it to the redo stack.
+  /// Returns the action so the caller can sync with the DB.
+  /// Returns null if the undo stack is empty.
+  UndoAction? popUndo() {
+    if (_undoStack.isEmpty) return null;
+    final action = _undoStack.removeLast();
+    _redoStack.add(action);
+    notifyListeners();
+    return action;
+  }
+
+  /// Pop the most recent redo action and move it back to the undo stack.
+  /// Returns the action so the caller can sync with the DB.
+  /// Returns null if the redo stack is empty.
+  UndoAction? popRedo() {
+    if (_redoStack.isEmpty) return null;
+    final action = _redoStack.removeLast();
+    _undoStack.add(action);
+    notifyListeners();
+    return action;
+  }
+
+  /// Clear both undo and redo stacks (e.g. on page change).
+  void clearUndoHistory() {
+    _undoStack.clear();
+    _redoStack.clear();
+    // No notifyListeners — typically called alongside clear() or loadStrokes()
   }
 
   // ---------------------------------------------------------------------------
@@ -238,10 +321,13 @@ class DrawingService extends ChangeNotifier {
     committedStrokes
       ..clear()
       ..addAll(strokes);
+    clearUndoHistory();
     notifyListeners();
   }
 
   /// Clear all strokes (for page navigation).
+  /// Note: the caller (CanvasWidget) is responsible for pushing
+  /// an UndoAction before calling this for user-initiated clears.
   void clear() {
     _inflightStroke = null;
     committedStrokes.clear();

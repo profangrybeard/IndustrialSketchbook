@@ -1,9 +1,12 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:industrial_sketchbook/models/eraser_mode.dart';
 import 'package:industrial_sketchbook/models/pencil_lead.dart';
+import 'package:industrial_sketchbook/models/pressure_curve.dart';
 import 'package:industrial_sketchbook/models/pressure_mode.dart';
 import 'package:industrial_sketchbook/models/stroke.dart';
 import 'package:industrial_sketchbook/models/stroke_point.dart';
 import 'package:industrial_sketchbook/models/tool_type.dart';
+import 'package:industrial_sketchbook/models/undo_action.dart';
 import 'package:industrial_sketchbook/services/drawing_service.dart';
 
 void main() {
@@ -447,6 +450,217 @@ void main() {
             lessThan(PencilLead.bold.grainIntensity));
         expect(PencilLead.bold.grainIntensity,
             lessThan(PencilLead.soft.grainIntensity));
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // Pressure curve (Phase 2.7)
+    // -----------------------------------------------------------------------
+    group('pressure curve', () {
+      test('defaults to PressureCurve.natural', () {
+        expect(service.pressureCurve, equals(PressureCurve.natural));
+      });
+
+      test('setter changes pressure curve', () {
+        service.pressureCurve = PressureCurve.heavy;
+        expect(service.pressureCurve, equals(PressureCurve.heavy));
+
+        service.pressureCurve = PressureCurve.linear;
+        expect(service.pressureCurve, equals(PressureCurve.linear));
+      });
+
+      test('setting same value does not notify', () {
+        int notifyCount = 0;
+        service.addListener(() => notifyCount++);
+
+        service.pressureCurve = PressureCurve.natural; // same as default
+        expect(notifyCount, equals(0));
+      });
+
+      test('changing pressure curve notifies listeners', () {
+        int notifyCount = 0;
+        service.addListener(() => notifyCount++);
+
+        service.pressureCurve = PressureCurve.heavy;
+        expect(notifyCount, equals(1));
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // Eraser mode (Phase 2.7)
+    // -----------------------------------------------------------------------
+    group('eraser mode', () {
+      test('defaults to EraserMode.standard', () {
+        expect(service.eraserMode, equals(EraserMode.standard));
+      });
+
+      test('setter changes eraser mode', () {
+        service.eraserMode = EraserMode.history;
+        expect(service.eraserMode, equals(EraserMode.history));
+      });
+
+      test('setting same value does not notify', () {
+        int notifyCount = 0;
+        service.addListener(() => notifyCount++);
+
+        service.eraserMode = EraserMode.standard; // same as default
+        expect(notifyCount, equals(0));
+      });
+
+      test('changing eraser mode notifies listeners', () {
+        int notifyCount = 0;
+        service.addListener(() => notifyCount++);
+
+        service.eraserMode = EraserMode.history;
+        expect(notifyCount, equals(1));
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // Undo / Redo (Phase 2.7)
+    // -----------------------------------------------------------------------
+    group('undo/redo', () {
+      test('initially canUndo and canRedo are false', () {
+        expect(service.canUndo, isFalse);
+        expect(service.canRedo, isFalse);
+      });
+
+      test('pushUndoAction makes canUndo true', () {
+        service.pushUndoAction(
+          UndoAction(strokesAdded: [_makeStroke('s1', 'p1')]),
+        );
+        expect(service.canUndo, isTrue);
+        expect(service.canRedo, isFalse);
+      });
+
+      test('popUndo returns the action and moves it to redo stack', () {
+        final stroke = _makeStroke('s1', 'p1');
+        service.pushUndoAction(UndoAction(strokesAdded: [stroke]));
+
+        final action = service.popUndo();
+        expect(action, isNotNull);
+        expect(action!.strokesAdded.first.id, equals('s1'));
+        expect(service.canUndo, isFalse);
+        expect(service.canRedo, isTrue);
+      });
+
+      test('popRedo returns the action and moves it back to undo stack', () {
+        final stroke = _makeStroke('s1', 'p1');
+        service.pushUndoAction(UndoAction(strokesAdded: [stroke]));
+        service.popUndo();
+
+        final action = service.popRedo();
+        expect(action, isNotNull);
+        expect(action!.strokesAdded.first.id, equals('s1'));
+        expect(service.canUndo, isTrue);
+        expect(service.canRedo, isFalse);
+      });
+
+      test('popUndo returns null when stack is empty', () {
+        expect(service.popUndo(), isNull);
+      });
+
+      test('popRedo returns null when stack is empty', () {
+        expect(service.popRedo(), isNull);
+      });
+
+      test('pushUndoAction clears redo stack', () {
+        service.pushUndoAction(
+          UndoAction(strokesAdded: [_makeStroke('s1', 'p1')]),
+        );
+        service.popUndo();
+        expect(service.canRedo, isTrue);
+
+        // New action clears redo
+        service.pushUndoAction(
+          UndoAction(strokesAdded: [_makeStroke('s2', 'p1')]),
+        );
+        expect(service.canRedo, isFalse);
+      });
+
+      test('undo stack enforces max 50 entries', () {
+        for (int i = 0; i < 55; i++) {
+          service.pushUndoAction(
+            UndoAction(strokesAdded: [_makeStroke('s-$i', 'p1')]),
+          );
+        }
+
+        // Should be able to undo exactly 50 times
+        int undoCount = 0;
+        while (service.canUndo) {
+          service.popUndo();
+          undoCount++;
+        }
+        expect(undoCount, equals(50));
+      });
+
+      test('clearUndoHistory empties both stacks', () {
+        service.pushUndoAction(
+          UndoAction(strokesAdded: [_makeStroke('s1', 'p1')]),
+        );
+        service.pushUndoAction(
+          UndoAction(strokesAdded: [_makeStroke('s2', 'p1')]),
+        );
+        service.popUndo(); // move one to redo
+
+        expect(service.canUndo, isTrue);
+        expect(service.canRedo, isTrue);
+
+        service.clearUndoHistory();
+
+        expect(service.canUndo, isFalse);
+        expect(service.canRedo, isFalse);
+      });
+
+      test('loadStrokes clears undo history', () {
+        service.pushUndoAction(
+          UndoAction(strokesAdded: [_makeStroke('s1', 'p1')]),
+        );
+        expect(service.canUndo, isTrue);
+
+        service.loadStrokes([_makeStroke('loaded', 'p1')]);
+        expect(service.canUndo, isFalse);
+        expect(service.canRedo, isFalse);
+      });
+
+      test('push and pop notify listeners', () {
+        int notifyCount = 0;
+        service.addListener(() => notifyCount++);
+
+        service.pushUndoAction(
+          UndoAction(strokesAdded: [_makeStroke('s1', 'p1')]),
+        );
+        expect(notifyCount, equals(1));
+
+        service.popUndo();
+        expect(notifyCount, equals(2));
+
+        service.popRedo();
+        expect(notifyCount, equals(3));
+      });
+
+      test('multiple undo/redo operations maintain correct order', () {
+        service.pushUndoAction(
+          UndoAction(strokesAdded: [_makeStroke('s1', 'p1')]),
+        );
+        service.pushUndoAction(
+          UndoAction(strokesAdded: [_makeStroke('s2', 'p1')]),
+        );
+        service.pushUndoAction(
+          UndoAction(strokesAdded: [_makeStroke('s3', 'p1')]),
+        );
+
+        // Undo pops newest first
+        expect(service.popUndo()!.strokesAdded.first.id, equals('s3'));
+        expect(service.popUndo()!.strokesAdded.first.id, equals('s2'));
+        expect(service.popUndo()!.strokesAdded.first.id, equals('s1'));
+        expect(service.canUndo, isFalse);
+
+        // Redo replays in order
+        expect(service.popRedo()!.strokesAdded.first.id, equals('s1'));
+        expect(service.popRedo()!.strokesAdded.first.id, equals('s2'));
+        expect(service.popRedo()!.strokesAdded.first.id, equals('s3'));
+        expect(service.canRedo, isFalse);
       });
     });
   });

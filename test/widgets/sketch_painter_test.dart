@@ -46,6 +46,47 @@ void main() {
     test('clamps pressure above 1.0', () {
       expect(SketchPainter.pencilPressure(1.5), closeTo(1.0, 0.001));
     });
+
+    test('custom exponent 1.0 gives linear (1:1) mapping', () {
+      expect(SketchPainter.pencilPressure(0.5, exponent: 1.0),
+          closeTo(0.5, 0.001));
+      expect(SketchPainter.pencilPressure(0.3, exponent: 1.0),
+          closeTo(0.3, 0.001));
+      expect(SketchPainter.pencilPressure(0.9, exponent: 1.0),
+          closeTo(0.9, 0.001));
+    });
+
+    test('custom exponent 2.5 gives heavier resistance than default', () {
+      final defaultResult = SketchPainter.pencilPressure(0.5); // exp 1.8
+      final heavyResult =
+          SketchPainter.pencilPressure(0.5, exponent: 2.5);
+      expect(heavyResult, lessThan(defaultResult));
+      expect(heavyResult, closeTo(math.pow(0.5, 2.5), 0.001));
+    });
+
+    test('custom exponent 1.4 gives lighter resistance than default', () {
+      final defaultResult = SketchPainter.pencilPressure(0.5); // exp 1.8
+      final lightResult =
+          SketchPainter.pencilPressure(0.5, exponent: 1.4);
+      expect(lightResult, greaterThan(defaultResult));
+      expect(lightResult, closeTo(math.pow(0.5, 1.4), 0.001));
+    });
+
+    test('all exponents give 0.0 at zero pressure', () {
+      for (final exp in [1.0, 1.4, 1.8, 2.5]) {
+        expect(SketchPainter.pencilPressure(0.0, exponent: exp),
+            closeTo(0.0, 0.001),
+            reason: 'exponent $exp at zero');
+      }
+    });
+
+    test('all exponents give 1.0 at full pressure', () {
+      for (final exp in [1.0, 1.4, 1.8, 2.5]) {
+        expect(SketchPainter.pencilPressure(1.0, exponent: exp),
+            closeTo(1.0, 0.001),
+            reason: 'exponent $exp at full');
+      }
+    });
   });
 
   // ---------------------------------------------------------------------------
