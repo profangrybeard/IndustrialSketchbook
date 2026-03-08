@@ -11,7 +11,7 @@ import '../models/stroke_point.dart';
 import '../models/tool_type.dart';
 import '../models/undo_action.dart';
 
-/// Drawing Pipeline (TDD §4.1).
+/// Drawing Pipeline (TDD §4.1, Phase 2.8).
 ///
 /// Runs on the UI thread. Latency critical.
 /// Extends [ChangeNotifier] to drive [CustomPainter] repaints via Riverpod.
@@ -38,6 +38,52 @@ class DrawingService extends ChangeNotifier {
 
   /// All committed strokes for the current page.
   final List<Stroke> committedStrokes = [];
+
+  // ---------------------------------------------------------------------------
+  // Stroke version & erased IDs cache (Phase 2.8)
+  // ---------------------------------------------------------------------------
+
+  /// Monotonically increasing counter for committed stroke mutations.
+  /// Used by [CommittedStrokesPainter.shouldRepaint()] for cache invalidation.
+  int _strokeVersion = 0;
+  int get strokeVersion => _strokeVersion;
+
+  /// Cached set of erased stroke IDs. Recomputed on version bump.
+  /// Eliminates per-frame [_collectErasedIds] computation from CanvasWidget.
+  Set<String> _erasedStrokeIds = {};
+  Set<String> get erasedStrokeIds => _erasedStrokeIds;
+
+  /// Increment version and recompute erased IDs.
+  void _bumpVersion() {
+    _strokeVersion++;
+    _recomputeErasedIds();
+  }
+
+  void _recomputeErasedIds() {
+    _erasedStrokeIds = {
+      for (final s in committedStrokes)
+        if (s.isTombstone && s.erasesStrokeId != null) s.erasesStrokeId!,
+    };
+  }
+
+  /// Add strokes to committed list and bump version.
+  ///
+  /// Callers must still call [notifyListeners] separately if additional
+  /// state changes are made in the same logical operation.
+  void addCommittedStrokes(List<Stroke> strokes) {
+    committedStrokes.addAll(strokes);
+    _bumpVersion();
+  }
+
+  /// Remove committed strokes matching [test] and bump version.
+  void removeCommittedStrokesWhere(bool Function(Stroke) test) {
+    committedStrokes.removeWhere(test);
+    _bumpVersion();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Tool state
+  // ---------------------------------------------------------------------------
 
   /// Current drawing tool.
   ToolType _currentTool = ToolType.pencil;
@@ -242,11 +288,16 @@ class DrawingService extends ChangeNotifier {
   /// Called on stylus ACTION_DOWN.
   ///
   /// Creates a new in-flight stroke with the first point.
+  /// If [stitchPoint] is provided (stroke stitching, Phase 2.8),
+  /// it is prepended to create a bridge from the previous stroke.
   void onPointerDown({
     required String strokeId,
     required String pageId,
     required StrokePoint point,
+    StrokePoint? stitchPoint,
   }) {
+    final points = stitchPoint != null ? [stitchPoint, point] : [point];
+
     _inflightStroke = Stroke(
       id: strokeId,
       pageId: pageId,
@@ -255,7 +306,7 @@ class DrawingService extends ChangeNotifier {
       color: _currentColor,
       weight: _currentWeight,
       opacity: _currentOpacity,
-      points: [point],
+      points: points,
       createdAt: DateTime.now().toUtc(),
     );
     notifyListeners();
@@ -311,6 +362,7 @@ class DrawingService extends ChangeNotifier {
 
     committedStrokes.add(committed);
     _inflightStroke = null;
+    _bumpVersion();
     notifyListeners();
     return committed;
   }
@@ -321,6 +373,7 @@ class DrawingService extends ChangeNotifier {
     committedStrokes
       ..clear()
       ..addAll(strokes);
+    _bumpVersion();
     clearUndoHistory();
     notifyListeners();
   }
@@ -331,6 +384,7 @@ class DrawingService extends ChangeNotifier {
   void clear() {
     _inflightStroke = null;
     committedStrokes.clear();
+    _bumpVersion();
     notifyListeners();
   }
 }

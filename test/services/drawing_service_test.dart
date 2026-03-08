@@ -663,6 +663,135 @@ void main() {
         expect(service.canRedo, isFalse);
       });
     });
+
+    // -----------------------------------------------------------------------
+    // Stroke version & erased IDs cache (Phase 2.8)
+    // -----------------------------------------------------------------------
+    group('strokeVersion', () {
+      test('initial strokeVersion is 0', () {
+        expect(service.strokeVersion, equals(0));
+      });
+
+      test('onPointerUp increments strokeVersion', () {
+        service.onPointerDown(
+          strokeId: 's1', pageId: 'p1', point: makePoint(0, 0),
+        );
+        final before = service.strokeVersion;
+        service.onPointerUp();
+        expect(service.strokeVersion, equals(before + 1));
+      });
+
+      test('loadStrokes increments strokeVersion', () {
+        final before = service.strokeVersion;
+        service.loadStrokes([_makeStroke('s1', 'p1')]);
+        expect(service.strokeVersion, greaterThan(before));
+      });
+
+      test('clear increments strokeVersion', () {
+        service.loadStrokes([_makeStroke('s1', 'p1')]);
+        final before = service.strokeVersion;
+        service.clear();
+        expect(service.strokeVersion, greaterThan(before));
+      });
+
+      test('addCommittedStrokes increments strokeVersion', () {
+        final before = service.strokeVersion;
+        service.addCommittedStrokes([_makeStroke('s1', 'p1')]);
+        expect(service.strokeVersion, equals(before + 1));
+      });
+
+      test('removeCommittedStrokesWhere increments strokeVersion', () {
+        service.addCommittedStrokes([_makeStroke('s1', 'p1')]);
+        final before = service.strokeVersion;
+        service.removeCommittedStrokesWhere((s) => s.id == 's1');
+        expect(service.strokeVersion, equals(before + 1));
+      });
+
+      test('onPointerMove does NOT increment strokeVersion', () {
+        service.onPointerDown(
+          strokeId: 's1', pageId: 'p1', point: makePoint(0, 0),
+        );
+        final before = service.strokeVersion;
+        service.onPointerMove(makePoint(10, 10));
+        expect(service.strokeVersion, equals(before));
+      });
+
+      test('tool/color/weight changes do NOT increment strokeVersion', () {
+        final before = service.strokeVersion;
+        service.currentTool = ToolType.pen;
+        service.currentColor = 0xFFFF0000;
+        service.currentWeight = 5.0;
+        expect(service.strokeVersion, equals(before));
+      });
+    });
+
+    group('erasedStrokeIds cache', () {
+      test('initially empty', () {
+        expect(service.erasedStrokeIds, isEmpty);
+      });
+
+      test('computed on version bump when tombstones present', () {
+        // Add a stroke
+        service.addCommittedStrokes([_makeStroke('target', 'p1')]);
+
+        // Add a tombstone that erases it
+        final tombstone = Stroke.tombstone(
+          id: 'tomb-1',
+          pageId: 'p1',
+          targetStrokeId: 'target',
+          createdAt: DateTime.utc(2024, 1, 1),
+        );
+        service.addCommittedStrokes([tombstone]);
+
+        expect(service.erasedStrokeIds, contains('target'));
+      });
+
+      test('cleared on clear()', () {
+        service.addCommittedStrokes([_makeStroke('s1', 'p1')]);
+        service.addCommittedStrokes([
+          Stroke.tombstone(
+            id: 'tomb-1', pageId: 'p1', targetStrokeId: 's1',
+            createdAt: DateTime.utc(2024, 1, 1),
+          ),
+        ]);
+        expect(service.erasedStrokeIds, isNotEmpty);
+
+        service.clear();
+        expect(service.erasedStrokeIds, isEmpty);
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // Stroke stitching — onPointerDown with stitchPoint (Phase 2.8)
+    // -----------------------------------------------------------------------
+    group('stroke stitching', () {
+      test('onPointerDown with stitchPoint creates stroke with 2 points', () {
+        final stitchPt = makePoint(100, 100, timestamp: 1000);
+        final newPt = makePoint(105, 105, timestamp: 2000);
+
+        service.onPointerDown(
+          strokeId: 's1',
+          pageId: 'p1',
+          point: newPt,
+          stitchPoint: stitchPt,
+        );
+
+        final stroke = service.inflightStroke!;
+        expect(stroke.points.length, equals(2));
+        expect(stroke.points.first.x, equals(100));
+        expect(stroke.points.last.x, equals(105));
+      });
+
+      test('onPointerDown without stitchPoint creates stroke with 1 point', () {
+        service.onPointerDown(
+          strokeId: 's1',
+          pageId: 'p1',
+          point: makePoint(50, 50),
+        );
+
+        expect(service.inflightStroke!.points.length, equals(1));
+      });
+    });
   });
 }
 

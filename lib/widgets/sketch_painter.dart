@@ -7,22 +7,18 @@ import '../models/pressure_mode.dart';
 import '../models/stroke.dart';
 import '../models/stroke_point.dart';
 import '../models/tool_type.dart';
+import 'stroke_rendering.dart' as rendering;
 
-/// Custom painter that renders committed strokes and the active in-flight
-/// stroke with pressure-sensitive line width (TDD §4.1).
+/// Legacy single-layer painter (Phase 2.6).
 ///
-/// Rendering approach:
-/// - Each stroke is drawn as a series of line segments between consecutive
-///   points, with per-segment width = `stroke.weight * point.pressure`.
-/// - Single-point strokes (taps) are drawn as filled circles.
-/// - Tombstoned strokes are skipped.
+/// **Superseded in Phase 2.8** by the three-layer architecture:
+/// - [BackgroundPainter] — paper + grid
+/// - [CommittedStrokesPainter] — committed strokes
+/// - [ActiveStrokePainter] — inflight stroke + eraser cursor
 ///
-/// Pencil tool rendering (Phase 2.6):
-/// - Non-linear pressure curve (`pow(pressure, 1.8)`) for natural resistance
-/// - Tilt-based width variation for side-shading
-/// - Position-based grain texture for paper drag feel
-/// - Velocity-based lightening for fast-stroke skipping
-/// - Pressure mode: width, opacity, or both
+/// Retained for backward compatibility with existing tests that reference
+/// the static helper methods ([pencilPressure], [tiltWidthMultiplier], etc.).
+/// These statics now forward to the shared functions in `stroke_rendering.dart`.
 class SketchPainter extends CustomPainter {
   SketchPainter({
     required this.committedStrokes,
@@ -51,14 +47,7 @@ class SketchPainter extends CustomPainter {
   /// The contrast factor is intentionally strong (0.35 toward mid-gray) so
   /// that 1–2px dots remain clearly visible on all paper colors.
   static Color gridColorForBackground(Color bg) {
-    final luminance = bg.computeLuminance();
-    if (luminance > 0.5) {
-      // Light paper: blend 35% toward mid-gray — gives ~#D3D3D3 on white
-      return Color.lerp(bg, const Color(0xFF808080), 0.35)!;
-    } else {
-      // Dark paper: blend 35% toward light gray — gives ~#666 on #2D2D2D
-      return Color.lerp(bg, const Color(0xFFD0D0D0), 0.35)!;
-    }
+    return rendering.gridColorForBackground(bg);
   }
 
   /// All finalized strokes for the current page.
@@ -227,7 +216,7 @@ class SketchPainter extends CustomPainter {
   /// - 1.8 = natural graphite feel (default, Phase 2.6 behavior)
   /// - 2.5 = heavy resistance
   static double pencilPressure(double rawPressure, {double exponent = 1.8}) {
-    return math.pow(rawPressure.clamp(0.0, 1.0), exponent).toDouble();
+    return rendering.pencilPressure(rawPressure, exponent: exponent);
   }
 
   /// Tilt-based width multiplier — tilting the stylus sideways widens the
@@ -236,14 +225,12 @@ class SketchPainter extends CustomPainter {
   /// At 0° tilt (upright): multiplier = 1.0 (normal line).
   /// At ±60° tilt (flat): multiplier = 3.0 (wide shading stroke).
   static double tiltWidthMultiplier(double tiltX) {
-    final tiltFraction = (tiltX.abs() / 60.0).clamp(0.0, 1.0);
-    return 1.0 + tiltFraction * 2.0;
+    return rendering.tiltWidthMultiplier(tiltX);
   }
 
   /// Tilt-based opacity fade — flat pencil produces lighter marks.
   static double tiltOpacityFade(double tiltX) {
-    final tiltFraction = (tiltX.abs() / 60.0).clamp(0.0, 1.0);
-    return 1.0 - tiltFraction * 0.3;
+    return rendering.tiltOpacityFade(tiltX);
   }
 
   /// Position-based deterministic grain texture.
@@ -253,10 +240,7 @@ class SketchPainter extends CustomPainter {
   ///
   /// The hash is position-based so grain is stable across repaints (no shimmer).
   static double grainFactor(double x, double y, double intensity) {
-    if (intensity <= 0) return 1.0;
-    // Deterministic pseudo-random from position
-    final hash = ((x * 73.0 + y * 179.0) % 1.0).abs();
-    return (1.0 - intensity) + hash * intensity;
+    return rendering.grainFactor(x, y, intensity);
   }
 
   /// Velocity-based opacity factor — fast strokes lighten (pencil skipping
@@ -264,17 +248,7 @@ class SketchPainter extends CustomPainter {
   ///
   /// Returns a value in [0.6, 1.0].
   static double velocityFactor(StrokePoint p0, StrokePoint p1) {
-    final dt = (p1.timestamp - p0.timestamp).abs();
-    if (dt <= 0) return 1.0;
-
-    final dx = p1.x - p0.x;
-    final dy = p1.y - p0.y;
-    final dist = math.sqrt(dx * dx + dy * dy);
-    final velocity = dist / (dt / 1000.0); // pixels per millisecond
-
-    // Fast strokes (>1.0 px/ms) lighten; slow strokes stay full
-    final factor = 1.0 - ((velocity - 1.0) / 3.0).clamp(0.0, 0.4);
-    return factor.clamp(0.6, 1.0);
+    return rendering.velocityFactor(p0, p1);
   }
 
   // ---------------------------------------------------------------------------
