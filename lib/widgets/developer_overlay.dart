@@ -11,9 +11,20 @@ import '../services/drawing_service.dart';
 /// drags move the overlay, while stylus input passes through to the canvas
 /// via [Listener] filtering.
 class DeveloperOverlay extends StatefulWidget {
-  const DeveloperOverlay({required this.drawingService, super.key});
+  const DeveloperOverlay({
+    required this.drawingService,
+    this.currentPageIndex = 0,
+    this.totalPages = 1,
+    super.key,
+  });
 
   final DrawingService drawingService;
+
+  /// Zero-based index of the current page (for display).
+  final int currentPageIndex;
+
+  /// Total pages in the chapter.
+  final int totalPages;
 
   @override
   State<DeveloperOverlay> createState() => _DeveloperOverlayState();
@@ -66,6 +77,7 @@ class _DeveloperOverlayState extends State<DeveloperOverlay> {
           ),
           child: Text(
             'rev $buildRevision \u00b7 $buildDate\n'
+            'pg ${widget.currentPageIndex + 1}/${widget.totalPages} \u00b7 '
             '$visibleStrokes strokes \u00b7 ${_formatNumber(totalPoints)} pts\n'
             '$memoryStr',
             style: TextStyle(

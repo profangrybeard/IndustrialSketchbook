@@ -16,6 +16,7 @@ import '../models/tool_type.dart';
 import '../models/undo_action.dart';
 import '../providers/database_provider.dart';
 import '../providers/drawing_provider.dart';
+import '../providers/notebook_provider.dart';
 import '../services/drawing_service.dart';
 import '../utils/stroke_splitter.dart';
 import 'active_stroke_painter.dart';
@@ -23,6 +24,7 @@ import 'background_painter.dart';
 import 'committed_strokes_painter.dart';
 import 'developer_overlay.dart';
 import 'floating_palette.dart';
+import 'page_strip.dart';
 
 const _uuid = Uuid();
 
@@ -48,11 +50,11 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   bool _penActive = false;
 
   /// Whether strokes have been loaded from the database for the current page.
-  /// Prevents re-loading on every widget rebuild.
+  /// Prevents re-loading on every widget rebuild. Reset on page switch.
   bool _strokesLoaded = false;
 
-  /// The page ID for strokes. Using a fixed default page for Phase 2.
-  final String _pageId = 'default-page';
+  /// The current page ID, read from the Riverpod provider.
+  String get _pageId => ref.read(currentPageIdProvider);
 
   /// Grid spacing in logical pixels.
   double _gridSpacing = 25.0;
@@ -241,8 +243,46 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
             onClear: () => _handleClear(drawingService),
           ),
 
-          // Developer overlay — build revision + memory stats (Phase 2.8.1)
-          DeveloperOverlay(drawingService: drawingService),
+          // Developer overlay + page navigation — both need page list data
+          Builder(builder: (context) {
+            final pagesAsync = ref.watch(pagesForChapterProvider);
+            final currentPageId = ref.watch(currentPageIdProvider);
+            return pagesAsync.when(
+              data: (pages) {
+                final currentIndex =
+                    pages.indexWhere((p) => p.id == currentPageId);
+                final safeIndex = currentIndex >= 0 ? currentIndex : 0;
+                return Stack(
+                  children: [
+                    // Developer overlay (Phase 2.8.1)
+                    DeveloperOverlay(
+                      drawingService: drawingService,
+                      currentPageIndex: safeIndex,
+                      totalPages: pages.length,
+                    ),
+                    // Page navigation strip (Layer 3)
+                    PageStrip(
+                      currentPage: safeIndex,
+                      totalPages: pages.length,
+                      onPrevPage: safeIndex > 0
+                          ? () => _switchToPage(
+                                pages[safeIndex - 1].id, drawingService)
+                          : null,
+                      onNextPage: safeIndex < pages.length - 1
+                          ? () => _switchToPage(
+                                pages[safeIndex + 1].id, drawingService)
+                          : null,
+                      onNewPage: () => _createNewPage(drawingService),
+                    ),
+                  ],
+                );
+              },
+              loading: () =>
+                  DeveloperOverlay(drawingService: drawingService),
+              error: (_, __) =>
+                  DeveloperOverlay(drawingService: drawingService),
+            );
+          }),
         ],
       ),
     );
@@ -599,6 +639,64 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
 
     _resetStitchState();
     drawingService.clear();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Page navigation (Layer 3)
+  // ---------------------------------------------------------------------------
+
+  /// Switch to a different page.
+  ///
+  /// Persists current page settings, clears the drawing service,
+  /// resets all transient state, then triggers a reload for the new page.
+  void _switchToPage(String newPageId, DrawingService drawingService) {
+    if (newPageId == _pageId) return;
+
+    // Persist current page settings before leaving
+    _persistPageSettings();
+
+    // Clear drawing state
+    drawingService.clear();
+    drawingService.clearUndoHistory();
+    _resetStitchState();
+
+    // Update the provider to the new page
+    ref.read(currentPageIdProvider.notifier).state = newPageId;
+
+    // Reset load flag so the next build loads the new page's data
+    setState(() {
+      _strokesLoaded = false;
+      _gridStyle = GridStyle.none;
+      _gridSpacing = 25.0;
+      _paperColor = BackgroundPainter.defaultPaperColor;
+    });
+  }
+
+  /// Create a new blank page at the end of the current chapter and switch to it.
+  Future<void> _createNewPage(DrawingService drawingService) async {
+    try {
+      final dbAsync = ref.read(databaseServiceProvider);
+      final db = dbAsync.valueOrNull;
+      if (db == null) return;
+
+      final pageCount = await db.getPageCount(defaultChapterId);
+      final newPageId = _uuid.v4();
+
+      await db.insertPage(SketchPage(
+        id: newPageId,
+        chapterId: defaultChapterId,
+        pageNumber: pageCount,
+      ));
+
+      // Invalidate the pages list so the strip updates
+      ref.invalidate(pagesForChapterProvider);
+
+      if (mounted) {
+        _switchToPage(newPageId, drawingService);
+      }
+    } catch (e) {
+      debugPrint('Failed to create new page: $e');
+    }
   }
 
   // ---------------------------------------------------------------------------

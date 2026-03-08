@@ -287,6 +287,57 @@ class DatabaseService {
     return rows.map(SketchPage.fromDbMap).toList();
   }
 
+  /// Get the number of pages in a chapter.
+  ///
+  /// Used for assigning pageNumber to new pages and for "Page X of Y" display.
+  Future<int> getPageCount(String chapterId) async {
+    final result = Sqflite.firstIntValue(await db.rawQuery(
+      'SELECT COUNT(*) FROM pages WHERE chapter_id = ?',
+      [chapterId],
+    ));
+    return result ?? 0;
+  }
+
+  /// Delete a page and all its associated data (strokes, stroke order).
+  ///
+  /// Cascade-deletes in a single transaction to maintain referential integrity.
+  /// Returns false if this is the last page in its chapter (safety guard —
+  /// a chapter must always have at least one page).
+  Future<bool> deletePage(String pageId) async {
+    // Look up the page to find its chapter
+    final page = await getPage(pageId);
+    if (page == null) return false;
+
+    // Safety: don't delete the last page in a chapter
+    final count = await getPageCount(page.chapterId);
+    if (count <= 1) return false;
+
+    await db.transaction((txn) async {
+      // 1. Remove stroke ordering entries
+      await txn.delete(
+        'page_stroke_order',
+        where: 'page_id = ?',
+        whereArgs: [pageId],
+      );
+
+      // 2. Remove strokes belonging to this page
+      await txn.delete(
+        'strokes',
+        where: 'page_id = ?',
+        whereArgs: [pageId],
+      );
+
+      // 3. Remove the page record
+      await txn.delete(
+        'pages',
+        where: 'id = ?',
+        whereArgs: [pageId],
+      );
+    });
+
+    return true;
+  }
+
   /// Update page visual settings (style, grid config, paper color).
   ///
   /// Called when the user changes grid style, spacing, or paper color
