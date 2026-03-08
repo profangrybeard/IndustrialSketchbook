@@ -38,6 +38,7 @@ dependencies:
 
   # Sorted lists and collection equality utilities
   collection: ^1.18.0
+  shared_preferences: ^2.5.4
 
 dev_dependencies:
   flutter_test:

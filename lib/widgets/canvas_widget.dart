@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/chapter.dart';
@@ -51,6 +52,10 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   /// Whether a stylus/pen is currently active (for palm rejection).
   bool _penActive = false;
 
+  /// Whether the last-viewed page has been restored from SharedPreferences.
+  /// Blocks stroke loading until the correct page ID is set.
+  bool _pageRestored = false;
+
   /// Whether strokes have been loaded from the database for the current page.
   /// Prevents re-loading on every widget rebuild. Reset on page switch.
   bool _strokesLoaded = false;
@@ -96,6 +101,49 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   /// Whether the current inflight stroke has a stitch point prepended.
   bool _hasStitchPoint = false;
 
+  // ---------------------------------------------------------------------------
+  // Pressure deadzone (prevents accidental strokes from light touches)
+  // ---------------------------------------------------------------------------
+
+  /// Minimum pressure required to start a stroke. Touches below this
+  /// threshold are ignored until pressure rises above it.
+  static const double _pressureDeadzone = 0.12;
+
+  /// True when pen-down was rejected due to pressure below deadzone.
+  /// Reset on pen-up. If pressure rises above threshold during a move,
+  /// the stroke starts then.
+  bool _belowDeadzone = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _restoreLastViewedPage();
+  }
+
+  /// Restore the last-viewed page from SharedPreferences on app launch.
+  Future<void> _restoreLastViewedPage() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedPageId = prefs.getString('lastPageId');
+      final savedChapterId = prefs.getString('lastChapterId');
+
+      if (mounted) {
+        if (savedPageId != null) {
+          ref.read(currentPageIdProvider.notifier).state = savedPageId;
+        }
+        if (savedChapterId != null) {
+          ref.read(currentChapterIdProvider.notifier).state = savedChapterId;
+        }
+        setState(() => _pageRestored = true);
+      }
+    } catch (e) {
+      debugPrint('Failed to restore last viewed page: $e');
+      if (mounted) {
+        setState(() => _pageRestored = true);
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final drawingService = ref.watch(drawingServiceProvider);
@@ -105,7 +153,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
     // The database provider is async (FutureProvider). When it resolves,
     // load all strokes and page settings for the current page.
     // This runs once per page — _strokesLoaded prevents re-loading.
-    if (!_strokesLoaded) {
+    if (!_strokesLoaded && _pageRestored) {
       final dbAsync = ref.watch(databaseServiceProvider);
       dbAsync.whenData((db) {
         _strokesLoaded = true;
@@ -375,6 +423,15 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       return;
     }
 
+    // --- Pressure deadzone ---
+    // Reject pen-down if pressure is below threshold to prevent
+    // accidental strokes from light stylus contact.
+    if (event.pressure < _pressureDeadzone) {
+      _belowDeadzone = true;
+      return;
+    }
+    _belowDeadzone = false;
+
     // --- Stroke stitching (Phase 2.8) ---
     final point = _eventToPoint(event);
     StrokePoint? stitchPoint;
@@ -410,6 +467,21 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       return;
     }
 
+    // Pressure deadzone: if pen-down was rejected, check if pressure
+    // has risen above threshold. If so, start the stroke now.
+    if (_belowDeadzone) {
+      if (event.pressure < _pressureDeadzone) return;
+      // Pressure crossed threshold — start stroke from this point
+      _belowDeadzone = false;
+      final point = _eventToPoint(event);
+      drawingService.onPointerDown(
+        strokeId: _uuid.v4(),
+        pageId: _pageId,
+        point: point,
+      );
+      return;
+    }
+
     drawingService.onPointerMove(_eventToPoint(event));
   }
 
@@ -420,6 +492,12 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
     if (event.kind == PointerDeviceKind.stylus ||
         event.kind == PointerDeviceKind.invertedStylus) {
       _penActive = false;
+    }
+
+    // Reset deadzone state — pen lifted without ever crossing threshold
+    if (_belowDeadzone) {
+      _belowDeadzone = false;
+      return;
     }
 
     final drawingService = ref.read(drawingServiceProvider);
@@ -455,6 +533,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
         event.kind == PointerDeviceKind.invertedStylus) {
       _penActive = false;
     }
+    _belowDeadzone = false;
 
     // Discard the in-flight stroke on cancel
     final drawingService = ref.read(drawingServiceProvider);
@@ -724,6 +803,9 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
     // Update the provider to the new page
     ref.read(currentPageIdProvider.notifier).state = newPageId;
 
+    // Persist last-viewed page for next app launch
+    _saveLastViewedPage(newPageId, ref.read(currentChapterIdProvider));
+
     // Reset load flag so the next build loads the new page's data
     setState(() {
       _strokesLoaded = false;
@@ -887,6 +969,18 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       }
     } catch (e) {
       debugPrint('Failed to delete strokes: $e');
+    }
+  }
+
+  /// Persist the last-viewed page/chapter to SharedPreferences so the app
+  /// can resume there on next launch.
+  Future<void> _saveLastViewedPage(String pageId, String chapterId) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('lastPageId', pageId);
+      await prefs.setString('lastChapterId', chapterId);
+    } catch (e) {
+      debugPrint('Failed to save last viewed page: $e');
     }
   }
 
