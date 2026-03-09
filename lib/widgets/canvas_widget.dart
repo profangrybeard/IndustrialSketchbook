@@ -28,6 +28,7 @@ import 'developer_overlay.dart';
 import 'floating_palette.dart';
 import 'organize_panel.dart';
 import 'page_strip.dart';
+import 'raster_cache_pool.dart';
 import 'stroke_raster_cache.dart';
 
 const _uuid = Uuid();
@@ -49,9 +50,14 @@ class CanvasWidget extends ConsumerStatefulWidget {
   ConsumerState<CanvasWidget> createState() => _CanvasWidgetState();
 }
 
-class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
-  /// Raster cache for committed strokes. Survives widget rebuilds.
-  final _strokeRasterCache = StrokeRasterCache();
+class _CanvasWidgetState extends ConsumerState<CanvasWidget>
+    with WidgetsBindingObserver {
+  /// LRU pool of raster caches for recently visited pages.
+  final _rasterCachePool = RasterCachePool(maxEntries: 3);
+
+  /// Active page's raster cache (from the pool).
+  StrokeRasterCache get _strokeRasterCache =>
+      _rasterCachePool.getOrCreate(_pageId);
 
   /// Whether a stylus/pen is currently active (for palm rejection).
   bool _penActive = false;
@@ -121,21 +127,33 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _restoreLastViewedPage();
   }
 
   @override
   void dispose() {
-    _strokeRasterCache.dispose();
+    WidgetsBinding.instance.removeObserver(this);
+    _rasterCachePool.dispose();
     super.dispose();
   }
 
-  /// Restore the last-viewed page from SharedPreferences on app launch.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      ref.read(drawingServiceProvider).saveToolState();
+    }
+  }
+
+  /// Restore the last-viewed page and tool state from SharedPreferences.
   Future<void> _restoreLastViewedPage() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final savedPageId = prefs.getString('lastPageId');
       final savedChapterId = prefs.getString('lastChapterId');
+
+      // Restore tool settings before first render
+      await ref.read(drawingServiceProvider).restoreToolState();
 
       if (mounted) {
         if (savedPageId != null) {
@@ -172,7 +190,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
         Future.microtask(() async {
           if (!mounted) return;
 
-          // Load strokes
+          // Load strokes for the current page
           final strokes = await db.getStrokesByPageId(_pageId);
           if (mounted && strokes.isNotEmpty) {
             drawingService.loadStrokes(strokes);
@@ -862,10 +880,11 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   void _switchToPage(String newPageId, DrawingService drawingService) {
     if (newPageId == _pageId) return;
 
-    // Persist current page settings before leaving
+    // Persist current page + tool settings before leaving
     _persistPageSettings();
+    drawingService.saveToolState();
 
-    // Clear drawing state and raster cache
+    // Clear drawing state and invalidate raster cache
     drawingService.clear();
     drawingService.clearUndoHistory();
     _resetStitchState();

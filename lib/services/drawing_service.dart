@@ -1,6 +1,7 @@
 import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/eraser_mode.dart';
 import '../models/pencil_lead.dart';
@@ -468,5 +469,84 @@ class DrawingService extends ChangeNotifier {
     _lastMutationInfo = const MutationInfo.fullRebuild();
     _bumpVersion();
     notifyListeners();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Tool state persistence
+  // ---------------------------------------------------------------------------
+
+  /// Persist current tool settings to SharedPreferences.
+  Future<void> saveToolState() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('tool_pressureMode', _pressureMode.name);
+      await prefs.setString('tool_pressureCurve', _pressureCurve.name);
+      await prefs.setString('tool_eraserMode', _eraserMode.name);
+      await prefs.setDouble('tool_weight', _currentWeight);
+      await prefs.setDouble('tool_opacity', _currentOpacity);
+      await prefs.setInt('tool_color', _currentColor);
+      if (_currentLead != null) {
+        await prefs.setString('tool_pencilLead', _currentLead!.name);
+      } else {
+        await prefs.remove('tool_pencilLead');
+      }
+    } catch (e) {
+      debugPrint('Failed to save tool state: $e');
+    }
+  }
+
+  /// Restore tool settings from SharedPreferences.
+  ///
+  /// Call once during startup, before the first render. Falls back to
+  /// the default value for any missing or invalid key.
+  Future<void> restoreToolState() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+
+      final modeStr = prefs.getString('tool_pressureMode');
+      if (modeStr != null) {
+        _pressureMode = PressureMode.values.firstWhere(
+          (m) => m.name == modeStr,
+          orElse: () => PressureMode.width,
+        );
+      }
+
+      final curveStr = prefs.getString('tool_pressureCurve');
+      if (curveStr != null) {
+        _pressureCurve = PressureCurve.values.firstWhere(
+          (c) => c.name == curveStr,
+          orElse: () => PressureCurve.natural,
+        );
+      }
+
+      final eraserStr = prefs.getString('tool_eraserMode');
+      if (eraserStr != null) {
+        _eraserMode = EraserMode.values.firstWhere(
+          (e) => e.name == eraserStr,
+          orElse: () => EraserMode.standard,
+        );
+      }
+
+      final weight = prefs.getDouble('tool_weight');
+      if (weight != null) _currentWeight = weight;
+
+      final opacity = prefs.getDouble('tool_opacity');
+      if (opacity != null) _currentOpacity = opacity;
+
+      final color = prefs.getInt('tool_color');
+      if (color != null) _currentColor = color;
+
+      final leadStr = prefs.getString('tool_pencilLead');
+      if (leadStr != null) {
+        _currentLead = PencilLead.values.firstWhere(
+          (l) => l.name == leadStr,
+          orElse: () => PencilLead.medium,
+        );
+      }
+
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Failed to restore tool state: $e');
+    }
   }
 }
