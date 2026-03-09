@@ -83,6 +83,38 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   /// when the pointer is not over the canvas).
   Offset? _eraserCursorPosition;
 
+  /// Last position where an erase hit-test was performed (throttle).
+  Offset? _lastErasePosition;
+
+  // ---------------------------------------------------------------------------
+  // Pinch-to-zoom state
+  // ---------------------------------------------------------------------------
+
+  /// Current canvas scale (1.0 = default, max 1.5).
+  double _canvasScale = 1.0;
+
+  /// Canvas pan offset (in screen coordinates).
+  Offset _canvasOffset = Offset.zero;
+
+  /// Scale at the start of the current pinch gesture.
+  double _baseScale = 1.0;
+
+  /// Offset at the start of the current pinch gesture.
+  Offset _baseOffset = Offset.zero;
+
+  /// Focal point at the start of the current pinch gesture.
+  Offset _baseFocal = Offset.zero;
+
+  /// Maximum allowed canvas scale.
+  static const double _maxScale = 1.5;
+
+  /// Active touch pointer positions (global/screen coordinates).
+  /// Used for pinch-to-zoom gesture detection.
+  final Map<int, Offset> _touchPointers = {};
+
+  /// Distance between fingers at the start of the current pinch gesture.
+  double? _basePinchDistance;
+
   // ---------------------------------------------------------------------------
   // Stroke stitching state (Phase 2.8)
   // ---------------------------------------------------------------------------
@@ -194,71 +226,85 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
     return Scaffold(
       body: Stack(
         children: [
-          // Layer 1: Background (paper + grid) — cached by RepaintBoundary
+          // Drawing canvas with pinch-to-zoom transform
           Positioned.fill(
-            child: RepaintBoundary(
-              child: CustomPaint(
-                painter: BackgroundPainter(
-                  paperColor: _paperColor,
-                  gridStyle: _gridStyle,
-                  gridSpacing: _gridSpacing,
-                ),
-                size: Size.infinite,
-              ),
-            ),
-          ),
-
-          // Layer 2: Committed strokes — cached by RepaintBoundary
-          Positioned.fill(
-            child: RepaintBoundary(
-              child: CustomPaint(
-                painter: CommittedStrokesPainter(
-                  committedStrokes: drawingService.committedStrokes,
-                  erasedStrokeIds: drawingService.erasedStrokeIds,
-                  strokeVersion: drawingService.strokeVersion,
-                  pressureMode: drawingService.pressureMode,
-                  grainIntensity:
-                      drawingService.currentLead?.grainIntensity ?? 0.25,
-                  pressureExponent:
-                      drawingService.pressureCurve.exponent,
-                  rasterCache: _strokeRasterCache,
-                  devicePixelRatio:
-                      MediaQuery.of(context).devicePixelRatio,
-                  lastMutationWasAppend:
-                      drawingService.lastMutationWasAppend,
-                  lastAppendedStroke:
-                      drawingService.lastAppendedStroke,
-                ),
-                size: Size.infinite,
-              ),
-            ),
-          ),
-
-          // Layer 3: Active stroke + eraser cursor (with pointer input)
-          Positioned.fill(
-            child: Listener(
-              onPointerDown: (event) => _handlePointerDown(event),
-              onPointerMove: (event) => _handlePointerMove(event),
-              onPointerUp: (event) => _handlePointerUp(event),
-              onPointerCancel: (event) => _handlePointerCancel(event),
-              behavior: HitTestBehavior.opaque,
-              child: RepaintBoundary(
-                child: CustomPaint(
-                  painter: ActiveStrokePainter(
-                    inflightStroke: drawingService.inflightStroke,
-                    eraserCursorPosition: _eraserCursorPosition,
-                    eraserRadius: hitRadius,
-                    showEraserCursor:
-                        drawingService.currentTool == ToolType.eraser &&
-                            _eraserCursorPosition != null,
-                    pressureMode: drawingService.pressureMode,
-                    grainIntensity:
-                        drawingService.currentLead?.grainIntensity ?? 0.25,
-                    pressureExponent:
-                        drawingService.pressureCurve.exponent,
-                    suppressSinglePoint: !_hasStitchPoint,
+            child: ClipRect(
+              child: Transform(
+                transform: Matrix4.identity()
+                  ..translate(_canvasOffset.dx, _canvasOffset.dy)
+                  ..scale(_canvasScale),
+                child: Stack(
+                  children: [
+              // Layer 1: Background (paper + grid) — cached by RepaintBoundary
+              Positioned.fill(
+                child: RepaintBoundary(
+                  child: CustomPaint(
+                    painter: BackgroundPainter(
+                      paperColor: _paperColor,
+                      gridStyle: _gridStyle,
+                      gridSpacing: _gridSpacing,
+                    ),
+                    size: Size.infinite,
                   ),
-                  size: Size.infinite,
+                ),
+              ),
+    
+              // Layer 2: Committed strokes — cached by RepaintBoundary
+              Positioned.fill(
+                child: RepaintBoundary(
+                  child: CustomPaint(
+                    painter: CommittedStrokesPainter(
+                      committedStrokes: drawingService.committedStrokes,
+                      erasedStrokeIds: drawingService.erasedStrokeIds,
+                      strokeVersion: drawingService.strokeVersion,
+                      pressureMode: drawingService.pressureMode,
+                      grainIntensity:
+                          drawingService.currentLead?.grainIntensity ?? 0.25,
+                      pressureExponent:
+                          drawingService.pressureCurve.exponent,
+                      rasterCache: _strokeRasterCache,
+                      devicePixelRatio:
+                          MediaQuery.of(context).devicePixelRatio,
+                      lastMutationWasAppend:
+                          drawingService.lastMutationWasAppend,
+                      lastAppendedStroke:
+                          drawingService.lastAppendedStroke,
+                    ),
+                    size: Size.infinite,
+                  ),
+                ),
+              ),
+    
+              // Layer 3: Active stroke + eraser cursor (with pointer input)
+              Positioned.fill(
+                child: Listener(
+                  onPointerDown: (event) => _handlePointerDown(event),
+                  onPointerMove: (event) => _handlePointerMove(event),
+                  onPointerUp: (event) => _handlePointerUp(event),
+                  onPointerCancel: (event) => _handlePointerCancel(event),
+                  behavior: HitTestBehavior.opaque,
+                  child: RepaintBoundary(
+                    child: CustomPaint(
+                      painter: ActiveStrokePainter(
+                        inflightStroke: drawingService.inflightStroke,
+                        eraserCursorPosition: _eraserCursorPosition,
+                        eraserRadius: hitRadius,
+                        showEraserCursor:
+                            drawingService.currentTool == ToolType.eraser &&
+                                _eraserCursorPosition != null,
+                        pressureMode: drawingService.pressureMode,
+                        grainIntensity:
+                            drawingService.currentLead?.grainIntensity ?? 0.25,
+                        pressureExponent:
+                            drawingService.pressureCurve.exponent,
+                        suppressSinglePoint: !_hasStitchPoint,
+                      ),
+                      size: Size.infinite,
+                    ),
+                  ),
+                ),
+              ),
+                  ],
                 ),
               ),
             ),
@@ -419,6 +465,13 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   // ---------------------------------------------------------------------------
 
   void _handlePointerDown(PointerDownEvent event) {
+    // Pinch-to-zoom: track touch pointers (screen coordinates)
+    if (event.kind == PointerDeviceKind.touch) {
+      _touchPointers[event.pointer] = event.position;
+      if (_touchPointers.length == 2) _startPinch();
+      return;
+    }
+
     // Palm rejection (DRW-006): Only accept stylus and mouse for drawing.
     if (!_isDrawingInput(event.kind)) return;
 
@@ -431,6 +484,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
 
     // Eraser: find and remove strokes near the point
     if (drawingService.currentTool == ToolType.eraser) {
+      _lastErasePosition = null; // reset throttle so first touch always erases
       setState(() => _eraserCursorPosition = event.localPosition);
       if (drawingService.eraserMode == EraserMode.history) {
         _historyEraseAt(event.localPosition, drawingService);
@@ -468,6 +522,13 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   }
 
   void _handlePointerMove(PointerMoveEvent event) {
+    // Pinch-to-zoom: update touch pointer positions
+    if (event.kind == PointerDeviceKind.touch) {
+      _touchPointers[event.pointer] = event.position;
+      if (_touchPointers.length >= 2) _updatePinch();
+      return;
+    }
+
     // Palm rejection: only accept stylus/mouse input for drawing
     if (!_isDrawingInput(event.kind)) return;
 
@@ -503,6 +564,13 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   }
 
   void _handlePointerUp(PointerUpEvent event) {
+    // Pinch-to-zoom: release touch pointer
+    if (event.kind == PointerDeviceKind.touch) {
+      _touchPointers.remove(event.pointer);
+      if (_touchPointers.length < 2) _endPinch();
+      return;
+    }
+
     // Palm rejection: only accept stylus/mouse input
     if (!_isDrawingInput(event.kind)) return;
 
@@ -546,6 +614,13 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   }
 
   void _handlePointerCancel(PointerCancelEvent event) {
+    // Pinch-to-zoom: clean up touch pointer on cancel
+    if (event.kind == PointerDeviceKind.touch) {
+      _touchPointers.remove(event.pointer);
+      if (_touchPointers.length < 2) _endPinch();
+      return;
+    }
+
     if (event.kind == PointerDeviceKind.stylus ||
         event.kind == PointerDeviceKind.invertedStylus) {
       _penActive = false;
@@ -589,6 +664,14 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
 
   /// Erase portions of strokes near the given position.
   void _standardEraseAt(Offset position, DrawingService drawingService) {
+    // Throttle: skip if cursor moved < 2px since last erase hit-test
+    if (_lastErasePosition != null) {
+      final dx = position.dx - _lastErasePosition!.dx;
+      final dy = position.dy - _lastErasePosition!.dy;
+      if (dx * dx + dy * dy < 4.0) return;
+    }
+    _lastErasePosition = position;
+
     final hitRadius = drawingService.currentWeight * 2.0;
     final hitRect = Rect.fromCenter(
       center: position,
@@ -596,14 +679,18 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       height: hitRadius * 2,
     );
 
-    // Start from the cached set, but track local additions within this call
-    final erasedIds = Set<String>.from(drawingService.erasedStrokeIds);
+    // Read the cached set directly — no defensive copy needed since we
+    // track newly-erased IDs separately and don’t modify the set here.
+    final erasedIds = drawingService.erasedStrokeIds;
+    final newlyErasedIds = <String>{};
     final strokesToAdd = <Stroke>[];
 
-    for (final stroke
-        in List<Stroke>.from(drawingService.committedStrokes)) {
+    // Iterate the committed list directly — no copy needed since we only
+    // append (via addCommittedStrokesForErase) AFTER the loop completes.
+    for (final stroke in drawingService.committedStrokes) {
       if (stroke.isTombstone) continue;
       if (erasedIds.contains(stroke.id)) continue;
+      if (newlyErasedIds.contains(stroke.id)) continue;
       if (!stroke.boundingRect.overlaps(hitRect)) continue;
 
       final segments = splitStrokePoints(
@@ -621,7 +708,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
         createdAt: DateTime.now().toUtc(),
       );
       strokesToAdd.add(tombstone);
-      erasedIds.add(stroke.id);
+      newlyErasedIds.add(stroke.id);
 
       for (final segment in segments) {
         strokesToAdd.add(Stroke(
@@ -639,7 +726,8 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
     }
 
     if (strokesToAdd.isNotEmpty) {
-      drawingService.addCommittedStrokes(strokesToAdd);
+      // Incremental update — avoids O(N) _recomputeErasedIds scan
+      drawingService.addCommittedStrokesForErase(strokesToAdd, newlyErasedIds);
       drawingService.notifyListeners();
 
       drawingService.pushUndoAction(
@@ -656,6 +744,14 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
 
   /// Erase the newest whole stroke at the given position.
   void _historyEraseAt(Offset position, DrawingService drawingService) {
+    // Throttle: skip if cursor moved < 2px since last erase hit-test
+    if (_lastErasePosition != null) {
+      final dx = position.dx - _lastErasePosition!.dx;
+      final dy = position.dy - _lastErasePosition!.dy;
+      if (dx * dx + dy * dy < 4.0) return;
+    }
+    _lastErasePosition = position;
+
     final hitRadius = drawingService.currentWeight * 2.0;
 
     final erasedIds = drawingService.erasedStrokeIds;
@@ -683,7 +779,8 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       createdAt: DateTime.now().toUtc(),
     );
 
-    drawingService.addCommittedStrokes([tombstone]);
+    // Incremental update — avoids O(N) _recomputeErasedIds scan
+    drawingService.addCommittedStrokesForErase([tombstone], {newest.id});
     drawingService.notifyListeners();
 
     drawingService.pushUndoAction(
@@ -903,6 +1000,82 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
     } catch (e) {
       debugPrint('Failed to navigate to chapter: $e');
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pinch-to-zoom gesture handling
+  // ---------------------------------------------------------------------------
+
+  /// Begin a pinch-to-zoom gesture when 2 touch pointers are active.
+  void _startPinch() {
+    final positions = _touchPointers.values.toList();
+    if (positions.length < 2) return;
+    _basePinchDistance = (positions[0] - positions[1]).distance;
+    _baseScale = _canvasScale;
+    _baseOffset = _canvasOffset;
+    _baseFocal = (positions[0] + positions[1]) / 2.0;
+  }
+
+  /// Update zoom/pan during an active pinch gesture.
+  void _updatePinch() {
+    if (_touchPointers.length < 2 || _basePinchDistance == null) return;
+    if (_basePinchDistance! < 1.0) return;
+
+    final positions = _touchPointers.values.toList();
+    final currentDistance = (positions[0] - positions[1]).distance;
+    final currentFocal = (positions[0] + positions[1]) / 2.0;
+
+    final rawScale = _baseScale * (currentDistance / _basePinchDistance!);
+    final newScale = rawScale.clamp(1.0, _maxScale);
+
+    // Adjust offset so the focal point stays visually stationary
+    final focalDelta = currentFocal - _baseFocal;
+    final scaleRatio = newScale / _baseScale;
+    final newOffset = _baseOffset + focalDelta -
+        (_baseFocal - _baseOffset) * (scaleRatio - 1.0);
+
+    setState(() {
+      _canvasScale = newScale;
+      _canvasOffset = newOffset;
+    });
+  }
+
+  /// End the pinch gesture and clamp the canvas offset.
+  void _endPinch() {
+    _basePinchDistance = null;
+    _clampCanvasOffset();
+  }
+
+  /// Clamp canvas offset so the canvas stays within viewable bounds.
+  void _clampCanvasOffset() {
+    if (_canvasScale <= 1.0) {
+      setState(() {
+        _canvasScale = 1.0;
+        _canvasOffset = Offset.zero;
+      });
+      return;
+    }
+
+    // At scale S, the canvas is S times larger than the viewport.
+    // Maximum pan in each direction = (S - 1) * viewportSize.
+    final size = MediaQuery.of(context).size;
+    final maxDx = ((_canvasScale - 1.0) * size.width) / 2.0;
+    final maxDy = ((_canvasScale - 1.0) * size.height) / 2.0;
+
+    setState(() {
+      _canvasOffset = Offset(
+        _canvasOffset.dx.clamp(-maxDx, maxDx),
+        _canvasOffset.dy.clamp(-maxDy, maxDy),
+      );
+    });
+  }
+
+  /// Reset zoom to 1.0x (double-tap to reset).
+  void _resetZoom() {
+    setState(() {
+      _canvasScale = 1.0;
+      _canvasOffset = Offset.zero;
+    });
   }
 
   // ---------------------------------------------------------------------------

@@ -214,12 +214,11 @@ class _FloatingPaletteState extends State<FloatingPalette> {
           ),
           const _PaletteDivider(),
 
-          // Weight
-          _PaletteIcon(
-            icon: Icons.line_weight,
-            tooltip: 'Stroke weight',
-            isActive: _expandedPanel == _SubPanel.weight,
-            onTap: () => _togglePanel(_SubPanel.weight),
+          // Weight — inline vertical slider (always accessible)
+          _InlineWeightSlider(
+            value: widget.currentWeight,
+            color: Color(widget.currentColor),
+            onChanged: widget.onWeightChanged,
           ),
           const _PaletteDivider(),
 
@@ -248,13 +247,13 @@ class _FloatingPaletteState extends State<FloatingPalette> {
           ),
           const _PaletteDivider(),
 
-          // Clear canvas
+          // Clear canvas (with confirmation dialog)
           _PaletteIcon(
             icon: Icons.delete_outline,
             tooltip: 'Clear',
             onTap: () {
               setState(() => _expandedPanel = null);
-              widget.onClear();
+              _confirmClear(context);
             },
           ),
         ],
@@ -722,6 +721,39 @@ class _FloatingPaletteState extends State<FloatingPalette> {
     };
   }
 
+  /// Show a confirmation dialog before clearing the canvas.
+  void _confirmClear(BuildContext context) {
+    showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF2A2A2A),
+        title: const Text(
+          'Clear Canvas?',
+          style: TextStyle(color: Colors.white),
+        ),
+        content: const Text(
+          'This will remove all strokes on the current page. You can undo this action.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: TextButton.styleFrom(foregroundColor: Colors.redAccent),
+            child: const Text('Clear'),
+          ),
+        ],
+      ),
+    ).then((confirmed) {
+      if (confirmed == true) {
+        widget.onClear();
+      }
+    });
+  }
+
   void _togglePanel(_SubPanel panel) {
     setState(() {
       _expandedPanel = _expandedPanel == panel ? null : panel;
@@ -1132,6 +1164,82 @@ class _QuickColorDot extends StatelessWidget {
             border: Border.all(color: Colors.white38, width: 1),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Compact vertical weight slider that fits inline in the palette strip.
+///
+/// Shows a rotated slider with a dot preview of the current weight.
+/// Height is compact (120px) to fit in the vertical palette.
+class _InlineWeightSlider extends StatelessWidget {
+  const _InlineWeightSlider({
+    required this.value,
+    required this.color,
+    required this.onChanged,
+  });
+
+  final double value;
+  final Color color;
+  final ValueChanged<double> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 48,
+      height: 120,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Weight preview dot (scales with current weight)
+          Container(
+            width: value.clamp(4.0, 20.0),
+            height: value.clamp(4.0, 20.0),
+            decoration: BoxDecoration(
+              color: color,
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: Colors.white38,
+                width: 0.5,
+              ),
+            ),
+          ),
+          const SizedBox(height: 2),
+          // Vertical slider (rotated)
+          Expanded(
+            child: RotatedBox(
+              quarterTurns: 3,
+              child: SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  trackHeight: 3.0,
+                  thumbShape:
+                      const RoundSliderThumbShape(enabledThumbRadius: 6),
+                  activeTrackColor: Colors.white70,
+                  inactiveTrackColor: Colors.white24,
+                  thumbColor: Colors.white,
+                  overlayShape:
+                      const RoundSliderOverlayShape(overlayRadius: 12),
+                ),
+                child: Slider(
+                  value: value,
+                  min: 0.5,
+                  max: 50.0,
+                  onChanged: onChanged,
+                ),
+              ),
+            ),
+          ),
+          // Weight value label
+          Text(
+            value.toStringAsFixed(1),
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.6),
+              fontSize: 9,
+              fontFamily: 'monospace',
+            ),
+          ),
+        ],
       ),
     );
   }
