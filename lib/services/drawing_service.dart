@@ -1,6 +1,7 @@
 import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/eraser_mode.dart';
 import '../models/pencil_lead.dart';
@@ -10,6 +11,52 @@ import '../models/stroke.dart';
 import '../models/stroke_point.dart';
 import '../models/tool_type.dart';
 import '../models/undo_action.dart';
+import '../utils/curve_fitter.dart';
+
+// ---------------------------------------------------------------------------
+// Raster cache mutation metadata
+// ---------------------------------------------------------------------------
+
+/// Describes the type of the most recent committed-stroke mutation.
+/// Used by [CommittedStrokesPainter] to select the optimal cache update path.
+enum MutationType {
+  /// A single stroke was appended (pen-up). Cache updates incrementally.
+  append,
+
+  /// Strokes were added/removed with a computable dirty region.
+  /// Only the affected area needs re-rendering.
+  dirtyRegion,
+
+  /// Full cache rebuild required (clear, load, or unknown mutation).
+  fullRebuild,
+}
+
+/// Metadata about the most recent committed-stroke mutation.
+///
+/// Replaces the previous `lastMutationWasAppend` + `lastAppendedStroke` pair
+/// with a richer descriptor that enables dirty-region cache updates.
+class MutationInfo {
+  const MutationInfo.append(this.appendedStroke)
+      : type = MutationType.append,
+        dirtyRect = null;
+
+  const MutationInfo.dirtyRegion(this.dirtyRect)
+      : type = MutationType.dirtyRegion,
+        appendedStroke = null;
+
+  const MutationInfo.fullRebuild()
+      : type = MutationType.fullRebuild,
+        dirtyRect = null,
+        appendedStroke = null;
+
+  final MutationType type;
+
+  /// The dirty rectangle for [MutationType.dirtyRegion] mutations.
+  final Rect? dirtyRect;
+
+  /// The newly appended stroke for [MutationType.append] mutations.
+  final Stroke? appendedStroke;
+}
 
 /// Drawing Pipeline (TDD §4.1, Phase 2.8).
 ///
@@ -62,15 +109,17 @@ class DrawingService extends ChangeNotifier {
   // Raster cache mutation tracking
   // ---------------------------------------------------------------------------
 
-  /// Whether the last strokeVersion bump was a simple single-stroke append
-  /// (pen-up). When true, the raster cache can be updated incrementally
-  /// instead of doing a full rebuild.
-  bool _lastMutationWasAppend = false;
-  bool get lastMutationWasAppend => _lastMutationWasAppend;
+  /// Describes the most recent committed-stroke mutation for cache updates.
+  MutationInfo _lastMutationInfo = const MutationInfo.fullRebuild();
+  MutationInfo get lastMutationInfo => _lastMutationInfo;
 
-  /// The stroke appended in the last pen-up, if [lastMutationWasAppend].
-  Stroke? _lastAppendedStroke;
-  Stroke? get lastAppendedStroke => _lastAppendedStroke;
+  /// Override the mutation info without bumping version.
+  ///
+  /// Called by canvas widget after performing mutations to set the correct
+  /// dirty rect for undo/redo/erase operations.
+  void setMutationInfo(MutationInfo info) {
+    _lastMutationInfo = info;
+  }
 
   /// Increment version and recompute erased IDs.
   void _bumpVersion() {
@@ -91,16 +140,14 @@ class DrawingService extends ChangeNotifier {
   /// state changes are made in the same logical operation.
   void addCommittedStrokes(List<Stroke> strokes) {
     committedStrokes.addAll(strokes);
-    _lastMutationWasAppend = false;
-    _lastAppendedStroke = null;
+    _lastMutationInfo = const MutationInfo.fullRebuild();
     _bumpVersion();
   }
 
   /// Remove committed strokes matching [test] and bump version.
   void removeCommittedStrokesWhere(bool Function(Stroke) test) {
     committedStrokes.removeWhere(test);
-    _lastMutationWasAppend = false;
-    _lastAppendedStroke = null;
+    _lastMutationInfo = const MutationInfo.fullRebuild();
     _bumpVersion();
   }
 
@@ -379,6 +426,7 @@ class DrawingService extends ChangeNotifier {
     // Finalize with frozen points list and creation timestamp.
     // List.of() creates an independent copy so the committed stroke
     // is not affected if _inflightPoints is reused.
+    final frozenPoints = List<StrokePoint>.of(_inflightPoints);
     final committed = Stroke(
       id: stroke.id,
       pageId: stroke.pageId,
@@ -387,15 +435,17 @@ class DrawingService extends ChangeNotifier {
       color: stroke.color,
       weight: stroke.weight,
       opacity: stroke.opacity,
-      points: List<StrokePoint>.of(_inflightPoints),
+      points: frozenPoints,
+      fittedPoints: CurveFitter.chaikinSmooth(
+        CurveFitter.simplify(frozenPoints),
+      ),
       createdAt: DateTime.now().toUtc(),
     );
 
     committedStrokes.add(committed);
     _inflightStroke = null;
     _inflightPoints = [];
-    _lastMutationWasAppend = true;
-    _lastAppendedStroke = committed;
+    _lastMutationInfo = MutationInfo.append(committed);
     _bumpVersion();
     notifyListeners();
     return committed;
@@ -408,8 +458,7 @@ class DrawingService extends ChangeNotifier {
     committedStrokes
       ..clear()
       ..addAll(strokes);
-    _lastMutationWasAppend = false;
-    _lastAppendedStroke = null;
+    _lastMutationInfo = const MutationInfo.fullRebuild();
     _bumpVersion();
     clearUndoHistory();
     notifyListeners();
@@ -422,9 +471,87 @@ class DrawingService extends ChangeNotifier {
     _inflightStroke = null;
     _inflightPoints = [];
     committedStrokes.clear();
-    _lastMutationWasAppend = false;
-    _lastAppendedStroke = null;
+    _lastMutationInfo = const MutationInfo.fullRebuild();
     _bumpVersion();
     notifyListeners();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Tool state persistence
+  // ---------------------------------------------------------------------------
+
+  /// Persist current tool settings to SharedPreferences.
+  Future<void> saveToolState() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('tool_pressureMode', _pressureMode.name);
+      await prefs.setString('tool_pressureCurve', _pressureCurve.name);
+      await prefs.setString('tool_eraserMode', _eraserMode.name);
+      await prefs.setDouble('tool_weight', _currentWeight);
+      await prefs.setDouble('tool_opacity', _currentOpacity);
+      await prefs.setInt('tool_color', _currentColor);
+      if (_currentLead != null) {
+        await prefs.setString('tool_pencilLead', _currentLead!.name);
+      } else {
+        await prefs.remove('tool_pencilLead');
+      }
+    } catch (e) {
+      debugPrint('Failed to save tool state: $e');
+    }
+  }
+
+  /// Restore tool settings from SharedPreferences.
+  ///
+  /// Call once during startup, before the first render. Falls back to
+  /// the default value for any missing or invalid key.
+  Future<void> restoreToolState() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+
+      final modeStr = prefs.getString('tool_pressureMode');
+      if (modeStr != null) {
+        _pressureMode = PressureMode.values.firstWhere(
+          (m) => m.name == modeStr,
+          orElse: () => PressureMode.width,
+        );
+      }
+
+      final curveStr = prefs.getString('tool_pressureCurve');
+      if (curveStr != null) {
+        _pressureCurve = PressureCurve.values.firstWhere(
+          (c) => c.name == curveStr,
+          orElse: () => PressureCurve.natural,
+        );
+      }
+
+      final eraserStr = prefs.getString('tool_eraserMode');
+      if (eraserStr != null) {
+        _eraserMode = EraserMode.values.firstWhere(
+          (e) => e.name == eraserStr,
+          orElse: () => EraserMode.standard,
+        );
+      }
+
+      final weight = prefs.getDouble('tool_weight');
+      if (weight != null) _currentWeight = weight;
+
+      final opacity = prefs.getDouble('tool_opacity');
+      if (opacity != null) _currentOpacity = opacity;
+
+      final color = prefs.getInt('tool_color');
+      if (color != null) _currentColor = color;
+
+      final leadStr = prefs.getString('tool_pencilLead');
+      if (leadStr != null) {
+        _currentLead = PencilLead.values.firstWhere(
+          (l) => l.name == leadStr,
+          orElse: () => PencilLead.medium,
+        );
+      }
+
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Failed to restore tool state: $e');
+    }
   }
 }
