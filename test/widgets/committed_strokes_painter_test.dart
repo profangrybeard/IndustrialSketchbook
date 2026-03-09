@@ -1,9 +1,20 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:industrial_sketchbook/models/pressure_mode.dart';
 import 'package:industrial_sketchbook/widgets/committed_strokes_painter.dart';
+import 'package:industrial_sketchbook/widgets/stroke_raster_cache.dart';
 
 void main() {
   group('CommittedStrokesPainter.shouldRepaint', () {
+    late StrokeRasterCache rasterCache;
+
+    setUp(() {
+      rasterCache = StrokeRasterCache();
+    });
+
+    tearDown(() {
+      rasterCache.dispose();
+    });
+
     CommittedStrokesPainter makePainter({
       int strokeVersion = 0,
       PressureMode pressureMode = PressureMode.width,
@@ -17,6 +28,9 @@ void main() {
         pressureMode: pressureMode,
         grainIntensity: grainIntensity,
         pressureExponent: pressureExponent,
+        rasterCache: rasterCache,
+        devicePixelRatio: 1.0,
+        lastMutationWasAppend: false,
       );
     }
 

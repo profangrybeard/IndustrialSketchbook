@@ -3,8 +3,10 @@ import 'dart:math' as math;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
+import '../models/chapter.dart';
 import '../models/eraser_mode.dart';
 import '../models/grid_config.dart';
 import '../models/grid_style.dart';
@@ -24,7 +26,9 @@ import 'background_painter.dart';
 import 'committed_strokes_painter.dart';
 import 'developer_overlay.dart';
 import 'floating_palette.dart';
+import 'organize_panel.dart';
 import 'page_strip.dart';
+import 'stroke_raster_cache.dart';
 
 const _uuid = Uuid();
 
@@ -46,12 +50,22 @@ class CanvasWidget extends ConsumerStatefulWidget {
 }
 
 class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
+  /// Raster cache for committed strokes. Survives widget rebuilds.
+  final _strokeRasterCache = StrokeRasterCache();
+
   /// Whether a stylus/pen is currently active (for palm rejection).
   bool _penActive = false;
+
+  /// Whether the last-viewed page has been restored from SharedPreferences.
+  /// Blocks stroke loading until the correct page ID is set.
+  bool _pageRestored = false;
 
   /// Whether strokes have been loaded from the database for the current page.
   /// Prevents re-loading on every widget rebuild. Reset on page switch.
   bool _strokesLoaded = false;
+
+  /// Whether the organize panel (Layer 4c) is currently visible.
+  bool _showOrganizePanel = false;
 
   /// The current page ID, read from the Riverpod provider.
   String get _pageId => ref.read(currentPageIdProvider);
@@ -91,6 +105,55 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   /// Whether the current inflight stroke has a stitch point prepended.
   bool _hasStitchPoint = false;
 
+  // ---------------------------------------------------------------------------
+  // Pressure deadzone (prevents accidental strokes from light touches)
+  // ---------------------------------------------------------------------------
+
+  /// Minimum pressure required to start a stroke. Touches below this
+  /// threshold are ignored until pressure rises above it.
+  static const double _pressureDeadzone = 0.12;
+
+  /// True when pen-down was rejected due to pressure below deadzone.
+  /// Reset on pen-up. If pressure rises above threshold during a move,
+  /// the stroke starts then.
+  bool _belowDeadzone = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _restoreLastViewedPage();
+  }
+
+  @override
+  void dispose() {
+    _strokeRasterCache.dispose();
+    super.dispose();
+  }
+
+  /// Restore the last-viewed page from SharedPreferences on app launch.
+  Future<void> _restoreLastViewedPage() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedPageId = prefs.getString('lastPageId');
+      final savedChapterId = prefs.getString('lastChapterId');
+
+      if (mounted) {
+        if (savedPageId != null) {
+          ref.read(currentPageIdProvider.notifier).state = savedPageId;
+        }
+        if (savedChapterId != null) {
+          ref.read(currentChapterIdProvider.notifier).state = savedChapterId;
+        }
+        setState(() => _pageRestored = true);
+      }
+    } catch (e) {
+      debugPrint('Failed to restore last viewed page: $e');
+      if (mounted) {
+        setState(() => _pageRestored = true);
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final drawingService = ref.watch(drawingServiceProvider);
@@ -100,7 +163,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
     // The database provider is async (FutureProvider). When it resolves,
     // load all strokes and page settings for the current page.
     // This runs once per page — _strokesLoaded prevents re-loading.
-    if (!_strokesLoaded) {
+    if (!_strokesLoaded && _pageRestored) {
       final dbAsync = ref.watch(databaseServiceProvider);
       dbAsync.whenData((db) {
         _strokesLoaded = true;
@@ -158,6 +221,13 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
                       drawingService.currentLead?.grainIntensity ?? 0.25,
                   pressureExponent:
                       drawingService.pressureCurve.exponent,
+                  rasterCache: _strokeRasterCache,
+                  devicePixelRatio:
+                      MediaQuery.of(context).devicePixelRatio,
+                  lastMutationWasAppend:
+                      drawingService.lastMutationWasAppend,
+                  lastAppendedStroke:
+                      drawingService.lastAppendedStroke,
                 ),
                 size: Size.infinite,
               ),
@@ -243,36 +313,69 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
             onClear: () => _handleClear(drawingService),
           ),
 
-          // Developer overlay + page navigation — both need page list data
+          // Developer overlay + page navigation — global page list (Layer 4b)
           Builder(builder: (context) {
-            final pagesAsync = ref.watch(pagesForChapterProvider);
+            final globalPagesAsync = ref.watch(globalPageListProvider);
             final currentPageId = ref.watch(currentPageIdProvider);
-            return pagesAsync.when(
-              data: (pages) {
-                final currentIndex =
-                    pages.indexWhere((p) => p.id == currentPageId);
-                final safeIndex = currentIndex >= 0 ? currentIndex : 0;
+            return globalPagesAsync.when(
+              data: (globalPages) {
+                if (globalPages.isEmpty) {
+                  return DeveloperOverlay(drawingService: drawingService);
+                }
+
+                final currentGlobalIndex = globalPages
+                    .indexWhere((e) => e.page.id == currentPageId);
+                final safeIndex =
+                    currentGlobalIndex >= 0 ? currentGlobalIndex : 0;
+                final currentEntry = globalPages[safeIndex];
+
+                // Auto-sync currentChapterIdProvider when navigating
+                // across chapter boundaries.
+                final currentChapterId =
+                    ref.read(currentChapterIdProvider);
+                if (currentEntry.chapterId != currentChapterId) {
+                  Future.microtask(() {
+                    if (mounted) {
+                      ref
+                          .read(currentChapterIdProvider.notifier)
+                          .state = currentEntry.chapterId;
+                    }
+                  });
+                }
+
                 return Stack(
                   children: [
                     // Developer overlay (Phase 2.8.1)
                     DeveloperOverlay(
                       drawingService: drawingService,
                       currentPageIndex: safeIndex,
-                      totalPages: pages.length,
+                      totalPages: globalPages.length,
+                      chapterIndex: currentEntry.chapterIndex,
+                      totalChapters: currentEntry.totalChapters,
                     ),
-                    // Page navigation strip (Layer 3)
+                    // Page navigation strip (Layer 4b)
                     PageStrip(
                       currentPage: safeIndex,
-                      totalPages: pages.length,
+                      totalPages: globalPages.length,
+                      chapterTitle: currentEntry.chapterTitle,
+                      chapterColor: currentEntry.chapterColor,
+                      chapterIndex: currentEntry.chapterIndex,
+                      totalChapters: currentEntry.totalChapters,
                       onPrevPage: safeIndex > 0
                           ? () => _switchToPage(
-                                pages[safeIndex - 1].id, drawingService)
+                                globalPages[safeIndex - 1].page.id,
+                                drawingService)
                           : null,
-                      onNextPage: safeIndex < pages.length - 1
+                      onNextPage: safeIndex < globalPages.length - 1
                           ? () => _switchToPage(
-                                pages[safeIndex + 1].id, drawingService)
+                                globalPages[safeIndex + 1].page.id,
+                                drawingService)
                           : null,
                       onNewPage: () => _createNewPage(drawingService),
+                      onNewChapter: () =>
+                          _createNewChapter(drawingService),
+                      onOrganize: () =>
+                          setState(() => _showOrganizePanel = true),
                     ),
                   ],
                 );
@@ -283,6 +386,29 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
                   DeveloperOverlay(drawingService: drawingService),
             );
           }),
+
+          // Organize panel overlay + scrim (Layer 4c)
+          if (_showOrganizePanel) ...[
+            // Scrim: semi-transparent backdrop that dismisses the panel
+            Positioned.fill(
+              child: GestureDetector(
+                onTap: () => setState(() => _showOrganizePanel = false),
+                child: Container(
+                  color: Colors.black.withValues(alpha: 0.3),
+                ),
+              ),
+            ),
+            // The organize panel itself
+            OrganizePanel(
+              onClose: () => setState(() => _showOrganizePanel = false),
+              onNavigateToChapter: (chapterId) {
+                _navigateToFirstPageOfChapter(chapterId, drawingService);
+                setState(() => _showOrganizePanel = false);
+              },
+              onSwitchToPage: (pageId) =>
+                  _switchToPage(pageId, drawingService),
+            ),
+          ],
         ],
       ),
     );
@@ -313,6 +439,15 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       }
       return;
     }
+
+    // --- Pressure deadzone ---
+    // Reject pen-down if pressure is below threshold to prevent
+    // accidental strokes from light stylus contact.
+    if (event.pressure < _pressureDeadzone) {
+      _belowDeadzone = true;
+      return;
+    }
+    _belowDeadzone = false;
 
     // --- Stroke stitching (Phase 2.8) ---
     final point = _eventToPoint(event);
@@ -349,6 +484,21 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       return;
     }
 
+    // Pressure deadzone: if pen-down was rejected, check if pressure
+    // has risen above threshold. If so, start the stroke now.
+    if (_belowDeadzone) {
+      if (event.pressure < _pressureDeadzone) return;
+      // Pressure crossed threshold — start stroke from this point
+      _belowDeadzone = false;
+      final point = _eventToPoint(event);
+      drawingService.onPointerDown(
+        strokeId: _uuid.v4(),
+        pageId: _pageId,
+        point: point,
+      );
+      return;
+    }
+
     drawingService.onPointerMove(_eventToPoint(event));
   }
 
@@ -359,6 +509,12 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
     if (event.kind == PointerDeviceKind.stylus ||
         event.kind == PointerDeviceKind.invertedStylus) {
       _penActive = false;
+    }
+
+    // Reset deadzone state — pen lifted without ever crossing threshold
+    if (_belowDeadzone) {
+      _belowDeadzone = false;
+      return;
     }
 
     final drawingService = ref.read(drawingServiceProvider);
@@ -394,6 +550,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
         event.kind == PointerDeviceKind.invertedStylus) {
       _penActive = false;
     }
+    _belowDeadzone = false;
 
     // Discard the in-flight stroke on cancel
     final drawingService = ref.read(drawingServiceProvider);
@@ -408,34 +565,12 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
 
   /// Whether a new stroke should be stitched to the previous one.
   ///
-  /// Returns true if the previous stroke ended recently (< 150ms),
-  /// spatially close (< 20px), and with the same drawing style.
+  /// Disabled: the stitching feature created visible "spider web" bridge
+  /// lines between letters in cursive handwriting. The temporal and spatial
+  /// thresholds were too generous, causing nearly every pen-lift between
+  /// letters to trigger a connecting line.
   bool _shouldStitch(PointerDownEvent event, DrawingService drawingService) {
-    if (_lastCommittedEndPoint == null) return false;
-
-    // Only stitch drawing tools (not eraser)
-    if (drawingService.currentTool == ToolType.eraser) return false;
-
-    // Style must match
-    if (drawingService.currentTool != _lastCommittedTool) return false;
-    if (drawingService.currentColor != _lastCommittedColor) return false;
-    if (drawingService.currentWeight != _lastCommittedWeight) return false;
-
-    // Temporal proximity: within 500ms
-    // Natural handwriting pen-lifts between letters are typically 150–400ms.
-    // The original 150ms threshold was too tight and missed most transitions.
-    final currentTimestamp = event.timeStamp.inMicroseconds;
-    final timeDelta = currentTimestamp - _lastCommittedTimestamp;
-    if (timeDelta > 500000) return false;
-
-    // Spatial proximity: within 50 logical pixels
-    // Generous threshold covers fast cursive strokes where the pen lands
-    // further from the last lift point.
-    final dx = event.localPosition.dx - _lastCommittedEndPoint!.x;
-    final dy = event.localPosition.dy - _lastCommittedEndPoint!.y;
-    if (dx * dx + dy * dy > 2500.0) return false;
-
-    return true;
+    return false;
   }
 
   /// Reset stroke stitching state (on undo/redo/clear).
@@ -655,13 +790,17 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
     // Persist current page settings before leaving
     _persistPageSettings();
 
-    // Clear drawing state
+    // Clear drawing state and raster cache
     drawingService.clear();
     drawingService.clearUndoHistory();
     _resetStitchState();
+    _strokeRasterCache.invalidate();
 
     // Update the provider to the new page
     ref.read(currentPageIdProvider.notifier).state = newPageId;
+
+    // Persist last-viewed page for next app launch
+    _saveLastViewedPage(newPageId, ref.read(currentChapterIdProvider));
 
     // Reset load flag so the next build loads the new page's data
     setState(() {
@@ -679,23 +818,90 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       final db = dbAsync.valueOrNull;
       if (db == null) return;
 
-      final pageCount = await db.getPageCount(defaultChapterId);
+      final chapterId = ref.read(currentChapterIdProvider);
+      final pageCount = await db.getPageCount(chapterId);
       final newPageId = _uuid.v4();
 
       await db.insertPage(SketchPage(
         id: newPageId,
-        chapterId: defaultChapterId,
+        chapterId: chapterId,
         pageNumber: pageCount,
       ));
 
-      // Invalidate the pages list so the strip updates
+      // Invalidate the pages lists so the strip updates
       ref.invalidate(pagesForChapterProvider);
+      ref.invalidate(globalPageListProvider);
 
       if (mounted) {
         _switchToPage(newPageId, drawingService);
       }
     } catch (e) {
       debugPrint('Failed to create new page: $e');
+    }
+  }
+
+  /// Create a new chapter at the end of the notebook with one blank page,
+  /// then navigate to that page.
+  Future<void> _createNewChapter(DrawingService drawingService) async {
+    try {
+      final dbAsync = ref.read(databaseServiceProvider);
+      final db = dbAsync.valueOrNull;
+      if (db == null) return;
+
+      final chapterCount = await db.getChapterCount(defaultNotebookId);
+      final newChapterId = _uuid.v4();
+      final newPageId = _uuid.v4();
+
+      // Insert chapter at the end
+      await db.insertChapter(Chapter(
+        id: newChapterId,
+        notebookId: defaultNotebookId,
+        title: 'Chapter ${chapterCount + 1}',
+        order: chapterCount,
+      ));
+
+      // Insert one blank page in the new chapter
+      await db.insertPage(SketchPage(
+        id: newPageId,
+        chapterId: newChapterId,
+        pageNumber: 0,
+      ));
+
+      // Update current chapter
+      ref.read(currentChapterIdProvider.notifier).state = newChapterId;
+
+      // Invalidate providers so they reload
+      ref.invalidate(globalPageListProvider);
+      ref.invalidate(chaptersProvider);
+      ref.invalidate(pagesForChapterProvider);
+
+      if (mounted) {
+        _switchToPage(newPageId, drawingService);
+      }
+    } catch (e) {
+      debugPrint('Failed to create new chapter: $e');
+    }
+  }
+
+  /// Navigate to the first page of a chapter (for organize panel jump-to).
+  Future<void> _navigateToFirstPageOfChapter(
+    String chapterId,
+    DrawingService drawingService,
+  ) async {
+    try {
+      final dbAsync = ref.read(databaseServiceProvider);
+      final db = dbAsync.valueOrNull;
+      if (db == null) return;
+
+      final pages = await db.getPagesByChapter(chapterId);
+      if (pages.isNotEmpty) {
+        ref.read(currentChapterIdProvider.notifier).state = chapterId;
+        if (mounted) {
+          _switchToPage(pages.first.id, drawingService);
+        }
+      }
+    } catch (e) {
+      debugPrint('Failed to navigate to chapter: $e');
     }
   }
 
@@ -762,6 +968,18 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
     }
   }
 
+  /// Persist the last-viewed page/chapter to SharedPreferences so the app
+  /// can resume there on next launch.
+  Future<void> _saveLastViewedPage(String pageId, String chapterId) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('lastPageId', pageId);
+      await prefs.setString('lastChapterId', chapterId);
+    } catch (e) {
+      debugPrint('Failed to save last viewed page: $e');
+    }
+  }
+
   /// Persist current page settings (grid style, spacing, paper color) to SQLite.
   ///
   /// Fire-and-forget — called when the user changes any visual setting
@@ -773,7 +991,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       if (db != null) {
         final page = SketchPage(
           id: _pageId,
-          chapterId: defaultChapterId,
+          chapterId: ref.read(currentChapterIdProvider),
           pageNumber: 0,
           style: _gridStyle.toPageStyle(),
           gridConfig: GridConfig(spacing: _gridSpacing),

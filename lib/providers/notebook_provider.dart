@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/global_page_entry.dart';
 import '../models/notebook.dart';
 import '../models/chapter.dart';
 import '../models/sketch_page.dart';
@@ -34,10 +35,58 @@ final chaptersProvider = FutureProvider<List<Chapter>>((ref) async {
 /// Initialized to [defaultPageId] (the seeded first page).
 final currentPageIdProvider = StateProvider<String>((ref) => defaultPageId);
 
-/// Provides all pages for the default chapter, ordered by pageNumber.
+/// Tracks the current chapter.
+///
+/// Updated automatically when navigating between pages — derived from
+/// whichever chapter contains the current page. Also used by
+/// `_createNewPage()` to insert into the correct chapter.
+final currentChapterIdProvider =
+    StateProvider<String>((ref) => defaultChapterId);
+
+/// Provides all pages for the current chapter, ordered by pageNumber.
 ///
 /// Used by the page strip to show "Page X of Y" and for navigation.
+/// Watches [currentChapterIdProvider] so it refreshes on chapter change.
 final pagesForChapterProvider = FutureProvider<List<SketchPage>>((ref) async {
+  final chapterId = ref.watch(currentChapterIdProvider);
   final db = await ref.watch(databaseServiceProvider.future);
-  return db.getPagesByChapter(defaultChapterId);
+  return db.getPagesByChapter(chapterId);
+});
+
+/// Provides ALL pages across all chapters in global order.
+///
+/// Each entry includes the page and its chapter context (title, color, index).
+/// Used by the page strip for cross-chapter navigation and by the developer
+/// overlay for global position display.
+///
+/// Ordering: chapters by sort_order ASC, pages by page_number ASC within
+/// each chapter. This forms the "infinite strip" of the sketchbook.
+final globalPageListProvider =
+    FutureProvider<List<GlobalPageEntry>>((ref) async {
+  final notebook = await ref.watch(currentNotebookProvider.future);
+  if (notebook == null) return [];
+
+  final db = await ref.watch(databaseServiceProvider.future);
+  final chapters = await db.getChaptersByNotebook(notebook.id);
+  if (chapters.isEmpty) return [];
+
+  final entries = <GlobalPageEntry>[];
+  final totalChapters = chapters.length;
+
+  for (int ci = 0; ci < chapters.length; ci++) {
+    final chapter = chapters[ci];
+    final pages = await db.getPagesByChapter(chapter.id);
+    for (final page in pages) {
+      entries.add(GlobalPageEntry(
+        page: page,
+        chapterId: chapter.id,
+        chapterTitle: chapter.title,
+        chapterColor: chapter.color,
+        chapterIndex: ci,
+        totalChapters: totalChapters,
+      ));
+    }
+  }
+
+  return entries;
 });

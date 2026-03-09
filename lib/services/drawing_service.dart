@@ -36,6 +36,11 @@ class DrawingService extends ChangeNotifier {
   /// The stroke currently being drawn (pen is down).
   Stroke? _inflightStroke;
 
+  /// Growable points list for the in-flight stroke.
+  /// Shared by reference with [_inflightStroke] — `.add()` is O(1) amortized
+  /// instead of rebuilding the entire Stroke + list on every pointer move.
+  List<StrokePoint> _inflightPoints = [];
+
   /// All committed strokes for the current page.
   final List<Stroke> committedStrokes = [];
 
@@ -52,6 +57,20 @@ class DrawingService extends ChangeNotifier {
   /// Eliminates per-frame [_collectErasedIds] computation from CanvasWidget.
   Set<String> _erasedStrokeIds = {};
   Set<String> get erasedStrokeIds => _erasedStrokeIds;
+
+  // ---------------------------------------------------------------------------
+  // Raster cache mutation tracking
+  // ---------------------------------------------------------------------------
+
+  /// Whether the last strokeVersion bump was a simple single-stroke append
+  /// (pen-up). When true, the raster cache can be updated incrementally
+  /// instead of doing a full rebuild.
+  bool _lastMutationWasAppend = false;
+  bool get lastMutationWasAppend => _lastMutationWasAppend;
+
+  /// The stroke appended in the last pen-up, if [lastMutationWasAppend].
+  Stroke? _lastAppendedStroke;
+  Stroke? get lastAppendedStroke => _lastAppendedStroke;
 
   /// Increment version and recompute erased IDs.
   void _bumpVersion() {
@@ -72,12 +91,16 @@ class DrawingService extends ChangeNotifier {
   /// state changes are made in the same logical operation.
   void addCommittedStrokes(List<Stroke> strokes) {
     committedStrokes.addAll(strokes);
+    _lastMutationWasAppend = false;
+    _lastAppendedStroke = null;
     _bumpVersion();
   }
 
   /// Remove committed strokes matching [test] and bump version.
   void removeCommittedStrokesWhere(bool Function(Stroke) test) {
     committedStrokes.removeWhere(test);
+    _lastMutationWasAppend = false;
+    _lastAppendedStroke = null;
     _bumpVersion();
   }
 
@@ -296,7 +319,7 @@ class DrawingService extends ChangeNotifier {
     required StrokePoint point,
     StrokePoint? stitchPoint,
   }) {
-    final points = stitchPoint != null ? [stitchPoint, point] : [point];
+    _inflightPoints = stitchPoint != null ? [stitchPoint, point] : [point];
 
     _inflightStroke = Stroke(
       id: strokeId,
@@ -306,7 +329,7 @@ class DrawingService extends ChangeNotifier {
       color: _currentColor,
       weight: _currentWeight,
       opacity: _currentOpacity,
-      points: points,
+      points: _inflightPoints,
       createdAt: DateTime.now().toUtc(),
     );
     notifyListeners();
@@ -314,13 +337,19 @@ class DrawingService extends ChangeNotifier {
 
   /// Called on stylus ACTION_MOVE (fires at 120–240 Hz on OnePlus Pad).
   ///
-  /// Appends a point to the in-flight stroke.
-  /// Triggers repaint for the new segment only.
+  /// Appends a point to the shared [_inflightPoints] list (O(1) amortized),
+  /// then creates a new [Stroke] shell referencing the same list. The new
+  /// object identity is needed for Flutter's change-detection to trigger
+  /// a repaint — but the list itself is never copied.
   void onPointerMove(StrokePoint point) {
     final stroke = _inflightStroke;
     if (stroke == null) return;
 
-    // Rebuild with new point appended (Stroke is immutable-ish for now)
+    _inflightPoints.add(point);
+
+    // New Stroke identity (cheap — 12 field assignments) sharing the
+    // same growable points list (no copy). This satisfies Flutter's
+    // identity-based repaint gating while keeping O(1) append cost.
     _inflightStroke = Stroke(
       id: stroke.id,
       pageId: stroke.pageId,
@@ -329,7 +358,7 @@ class DrawingService extends ChangeNotifier {
       color: stroke.color,
       weight: stroke.weight,
       opacity: stroke.opacity,
-      points: [...stroke.points, point],
+      points: _inflightPoints,
       createdAt: stroke.createdAt,
     );
     notifyListeners();
@@ -347,7 +376,9 @@ class DrawingService extends ChangeNotifier {
     final stroke = _inflightStroke;
     if (stroke == null) return null;
 
-    // Finalize with creation timestamp
+    // Finalize with frozen points list and creation timestamp.
+    // List.of() creates an independent copy so the committed stroke
+    // is not affected if _inflightPoints is reused.
     final committed = Stroke(
       id: stroke.id,
       pageId: stroke.pageId,
@@ -356,12 +387,15 @@ class DrawingService extends ChangeNotifier {
       color: stroke.color,
       weight: stroke.weight,
       opacity: stroke.opacity,
-      points: stroke.points,
+      points: List<StrokePoint>.of(_inflightPoints),
       createdAt: DateTime.now().toUtc(),
     );
 
     committedStrokes.add(committed);
     _inflightStroke = null;
+    _inflightPoints = [];
+    _lastMutationWasAppend = true;
+    _lastAppendedStroke = committed;
     _bumpVersion();
     notifyListeners();
     return committed;
@@ -370,9 +404,12 @@ class DrawingService extends ChangeNotifier {
   /// Load persisted strokes (e.g. when navigating to a page).
   void loadStrokes(List<Stroke> strokes) {
     _inflightStroke = null;
+    _inflightPoints = [];
     committedStrokes
       ..clear()
       ..addAll(strokes);
+    _lastMutationWasAppend = false;
+    _lastAppendedStroke = null;
     _bumpVersion();
     clearUndoHistory();
     notifyListeners();
@@ -383,7 +420,10 @@ class DrawingService extends ChangeNotifier {
   /// an UndoAction before calling this for user-initiated clears.
   void clear() {
     _inflightStroke = null;
+    _inflightPoints = [];
     committedStrokes.clear();
+    _lastMutationWasAppend = false;
+    _lastAppendedStroke = null;
     _bumpVersion();
     notifyListeners();
   }

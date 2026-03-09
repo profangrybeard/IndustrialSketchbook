@@ -15,16 +15,24 @@ class DeveloperOverlay extends StatefulWidget {
     required this.drawingService,
     this.currentPageIndex = 0,
     this.totalPages = 1,
+    this.chapterIndex = 0,
+    this.totalChapters = 1,
     super.key,
   });
 
   final DrawingService drawingService;
 
-  /// Zero-based index of the current page (for display).
+  /// Zero-based index of the current page (global, across all chapters).
   final int currentPageIndex;
 
-  /// Total pages in the chapter.
+  /// Total pages across all chapters.
   final int totalPages;
+
+  /// Zero-based index of the current chapter.
+  final int chapterIndex;
+
+  /// Total number of chapters in the notebook.
+  final int totalChapters;
 
   @override
   State<DeveloperOverlay> createState() => _DeveloperOverlayState();
@@ -78,6 +86,7 @@ class _DeveloperOverlayState extends State<DeveloperOverlay> {
           child: Text(
             'rev $buildRevision \u00b7 $buildDate\n'
             'pg ${widget.currentPageIndex + 1}/${widget.totalPages} \u00b7 '
+            'ch ${widget.chapterIndex + 1}/${widget.totalChapters} \u00b7 '
             '$visibleStrokes strokes \u00b7 ${_formatNumber(totalPoints)} pts\n'
             '$memoryStr',
             style: TextStyle(

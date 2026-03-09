@@ -792,6 +792,83 @@ void main() {
         expect(service.inflightStroke!.points.length, equals(1));
       });
     });
+
+    // -----------------------------------------------------------------------
+    // Raster cache mutation tracking (Phase 2.8 — RST tests)
+    // -----------------------------------------------------------------------
+    group('raster cache mutation tracking', () {
+      // RST-011
+      test('RST-011: onPointerUp sets lastMutationWasAppend = true', () {
+        service.onPointerDown(
+          strokeId: 's1', pageId: 'p1', point: makePoint(0, 0),
+        );
+        service.onPointerMove(makePoint(10, 10));
+        final committed = service.onPointerUp();
+
+        expect(service.lastMutationWasAppend, isTrue);
+        expect(service.lastAppendedStroke, isNotNull);
+        expect(service.lastAppendedStroke!.id, equals(committed!.id));
+      });
+
+      // RST-012
+      test('RST-012: addCommittedStrokes sets lastMutationWasAppend = false', () {
+        // First set it to true via pen-up
+        service.onPointerDown(
+          strokeId: 's1', pageId: 'p1', point: makePoint(0, 0),
+        );
+        service.onPointerUp();
+        expect(service.lastMutationWasAppend, isTrue);
+
+        // Now addCommittedStrokes should clear it
+        service.addCommittedStrokes([_makeStroke('s2', 'p1')]);
+        expect(service.lastMutationWasAppend, isFalse);
+        expect(service.lastAppendedStroke, isNull);
+      });
+
+      // RST-013
+      test('RST-013: removeCommittedStrokesWhere sets lastMutationWasAppend = false', () {
+        service.onPointerDown(
+          strokeId: 's1', pageId: 'p1', point: makePoint(0, 0),
+        );
+        service.onPointerUp();
+        expect(service.lastMutationWasAppend, isTrue);
+
+        service.removeCommittedStrokesWhere((s) => s.id == 's1');
+        expect(service.lastMutationWasAppend, isFalse);
+        expect(service.lastAppendedStroke, isNull);
+      });
+
+      // RST-014
+      test('RST-014: loadStrokes sets lastMutationWasAppend = false', () {
+        service.onPointerDown(
+          strokeId: 's1', pageId: 'p1', point: makePoint(0, 0),
+        );
+        service.onPointerUp();
+        expect(service.lastMutationWasAppend, isTrue);
+
+        service.loadStrokes([_makeStroke('loaded', 'p1')]);
+        expect(service.lastMutationWasAppend, isFalse);
+        expect(service.lastAppendedStroke, isNull);
+      });
+
+      // RST-015
+      test('RST-015: clear sets lastMutationWasAppend = false', () {
+        service.onPointerDown(
+          strokeId: 's1', pageId: 'p1', point: makePoint(0, 0),
+        );
+        service.onPointerUp();
+        expect(service.lastMutationWasAppend, isTrue);
+
+        service.clear();
+        expect(service.lastMutationWasAppend, isFalse);
+        expect(service.lastAppendedStroke, isNull);
+      });
+
+      test('lastMutationWasAppend is false initially', () {
+        expect(service.lastMutationWasAppend, isFalse);
+        expect(service.lastAppendedStroke, isNull);
+      });
+    });
   });
 }
 
