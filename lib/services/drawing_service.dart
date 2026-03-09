@@ -11,6 +11,7 @@ import '../models/stroke.dart';
 import '../models/stroke_point.dart';
 import '../models/tool_type.dart';
 import '../models/undo_action.dart';
+import '../utils/curve_fitter.dart';
 
 // ---------------------------------------------------------------------------
 // Raster cache mutation metadata
@@ -425,6 +426,7 @@ class DrawingService extends ChangeNotifier {
     // Finalize with frozen points list and creation timestamp.
     // List.of() creates an independent copy so the committed stroke
     // is not affected if _inflightPoints is reused.
+    final frozenPoints = List<StrokePoint>.of(_inflightPoints);
     final committed = Stroke(
       id: stroke.id,
       pageId: stroke.pageId,
@@ -433,7 +435,10 @@ class DrawingService extends ChangeNotifier {
       color: stroke.color,
       weight: stroke.weight,
       opacity: stroke.opacity,
-      points: List<StrokePoint>.of(_inflightPoints),
+      points: frozenPoints,
+      fittedPoints: CurveFitter.chaikinSmooth(
+        CurveFitter.simplify(frozenPoints),
+      ),
       createdAt: DateTime.now().toUtc(),
     );
 

@@ -276,7 +276,7 @@ void renderStroke(
   required double grainIntensity,
   required double pressureExponent,
 }) {
-  final points = stroke.points;
+  final points = stroke.renderPoints;
   if (points.isEmpty) return;
 
   final paint = Paint()
@@ -355,7 +355,7 @@ void renderStroke(
 ///
 /// Round end caps are drawn as semicircles at the first and last points.
 void _renderStandardStroke(Canvas canvas, Stroke stroke, Paint paint) {
-  final points = stroke.points;
+  final points = stroke.renderPoints;
 
   // Isolate stroke rendering to prevent alpha compounding
   canvas.saveLayer(stroke.boundingRect, Paint());
@@ -437,7 +437,7 @@ void _renderPencilStroke(
   double grainIntensity,
   double pressureExponent,
 ) {
-  final points = stroke.points;
+  final points = stroke.renderPoints;
 
   // Isolate stroke rendering to prevent alpha compounding
   canvas.saveLayer(stroke.boundingRect, Paint());

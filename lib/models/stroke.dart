@@ -35,8 +35,20 @@ class Stroke {
   /// Global opacity, separate from color alpha (0.01–1.0).
   final double opacity;
 
-  /// The point samples. Minimum one point (tap = single point stroke).
+  /// The raw point samples (Level 0). Minimum one point (tap = single point stroke).
   final List<StrokePoint> points;
+
+  /// Simplified point set (Level 1) produced by [CurveFitter] on pen-up.
+  ///
+  /// Null for legacy strokes or strokes that haven't been fitted yet.
+  /// When non-null, the renderer uses this instead of [points] for
+  /// visually identical output with fewer points through the Catmull-Rom
+  /// pipeline.
+  final List<StrokePoint>? fittedPoints;
+
+  /// The points the renderer should use: [fittedPoints] if available,
+  /// otherwise falls back to raw [points].
+  List<StrokePoint> get renderPoints => fittedPoints ?? points;
 
   /// Set at pen-up. Not modified thereafter.
   final DateTime createdAt;
@@ -59,6 +71,7 @@ class Stroke {
     required this.weight,
     required this.opacity,
     required this.points,
+    this.fittedPoints,
     required this.createdAt,
     this.isTombstone = false,
     this.erasesStrokeId,
@@ -133,6 +146,8 @@ class Stroke {
         'weight': weight,
         'opacity': opacity,
         'points': points.map((p) => p.toJson()).toList(),
+        if (fittedPoints != null)
+          'fittedPoints': fittedPoints!.map((p) => p.toJson()).toList(),
         'createdAt': createdAt.toUtc().toIso8601String(),
         'isTombstone': isTombstone,
         'erasesStrokeId': erasesStrokeId,
@@ -150,6 +165,11 @@ class Stroke {
         points: (json['points'] as List)
             .map((p) => StrokePoint.fromJson(p as Map<String, dynamic>))
             .toList(),
+        fittedPoints: json['fittedPoints'] != null
+            ? (json['fittedPoints'] as List)
+                .map((p) => StrokePoint.fromJson(p as Map<String, dynamic>))
+                .toList()
+            : null,
         createdAt: DateTime.parse(json['createdAt'] as String),
         isTombstone: json['isTombstone'] as bool? ?? false,
         erasesStrokeId: json['erasesStrokeId'] as String?,
@@ -166,6 +186,8 @@ class Stroke {
         'weight': weight,
         'opacity': opacity,
         'points_blob': StrokePoint.packAll(points),
+        'fitted_points_blob':
+            fittedPoints != null ? StrokePoint.packAll(fittedPoints!) : null,
         'created_at': createdAt.toUtc().toIso8601String(),
         'is_tombstone': isTombstone ? 1 : 0,
         'erases_stroke_id': erasesStrokeId,
@@ -182,6 +204,9 @@ class Stroke {
         weight: (map['weight'] as num).toDouble(),
         opacity: (map['opacity'] as num).toDouble(),
         points: StrokePoint.unpackAll(map['points_blob'] as Uint8List),
+        fittedPoints: map['fitted_points_blob'] != null
+            ? StrokePoint.unpackAll(map['fitted_points_blob'] as Uint8List)
+            : null,
         createdAt: DateTime.parse(map['created_at'] as String),
         isTombstone: (map['is_tombstone'] as int) == 1,
         erasesStrokeId: map['erases_stroke_id'] as String?,
