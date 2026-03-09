@@ -1,3 +1,5 @@
+import 'dart:ui';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:industrial_sketchbook/models/eraser_mode.dart';
 import 'package:industrial_sketchbook/models/pencil_lead.dart';
@@ -798,75 +800,87 @@ void main() {
     // -----------------------------------------------------------------------
     group('raster cache mutation tracking', () {
       // RST-011
-      test('RST-011: onPointerUp sets lastMutationWasAppend = true', () {
+      test('RST-011: onPointerUp sets mutation to append', () {
         service.onPointerDown(
           strokeId: 's1', pageId: 'p1', point: makePoint(0, 0),
         );
         service.onPointerMove(makePoint(10, 10));
         final committed = service.onPointerUp();
 
-        expect(service.lastMutationWasAppend, isTrue);
-        expect(service.lastAppendedStroke, isNotNull);
-        expect(service.lastAppendedStroke!.id, equals(committed!.id));
+        expect(service.lastMutationInfo.type, equals(MutationType.append));
+        expect(service.lastMutationInfo.appendedStroke, isNotNull);
+        expect(service.lastMutationInfo.appendedStroke!.id,
+            equals(committed!.id));
       });
 
       // RST-012
-      test('RST-012: addCommittedStrokes sets lastMutationWasAppend = false', () {
-        // First set it to true via pen-up
+      test('RST-012: addCommittedStrokes sets mutation to fullRebuild', () {
+        // First set it to append via pen-up
         service.onPointerDown(
           strokeId: 's1', pageId: 'p1', point: makePoint(0, 0),
         );
         service.onPointerUp();
-        expect(service.lastMutationWasAppend, isTrue);
+        expect(service.lastMutationInfo.type, equals(MutationType.append));
 
-        // Now addCommittedStrokes should clear it
+        // Now addCommittedStrokes should set fullRebuild
         service.addCommittedStrokes([_makeStroke('s2', 'p1')]);
-        expect(service.lastMutationWasAppend, isFalse);
-        expect(service.lastAppendedStroke, isNull);
+        expect(service.lastMutationInfo.type, equals(MutationType.fullRebuild));
+        expect(service.lastMutationInfo.appendedStroke, isNull);
       });
 
       // RST-013
-      test('RST-013: removeCommittedStrokesWhere sets lastMutationWasAppend = false', () {
+      test('RST-013: removeCommittedStrokesWhere sets mutation to fullRebuild', () {
         service.onPointerDown(
           strokeId: 's1', pageId: 'p1', point: makePoint(0, 0),
         );
         service.onPointerUp();
-        expect(service.lastMutationWasAppend, isTrue);
+        expect(service.lastMutationInfo.type, equals(MutationType.append));
 
         service.removeCommittedStrokesWhere((s) => s.id == 's1');
-        expect(service.lastMutationWasAppend, isFalse);
-        expect(service.lastAppendedStroke, isNull);
+        expect(service.lastMutationInfo.type, equals(MutationType.fullRebuild));
+        expect(service.lastMutationInfo.appendedStroke, isNull);
       });
 
       // RST-014
-      test('RST-014: loadStrokes sets lastMutationWasAppend = false', () {
+      test('RST-014: loadStrokes sets mutation to fullRebuild', () {
         service.onPointerDown(
           strokeId: 's1', pageId: 'p1', point: makePoint(0, 0),
         );
         service.onPointerUp();
-        expect(service.lastMutationWasAppend, isTrue);
+        expect(service.lastMutationInfo.type, equals(MutationType.append));
 
         service.loadStrokes([_makeStroke('loaded', 'p1')]);
-        expect(service.lastMutationWasAppend, isFalse);
-        expect(service.lastAppendedStroke, isNull);
+        expect(service.lastMutationInfo.type, equals(MutationType.fullRebuild));
+        expect(service.lastMutationInfo.appendedStroke, isNull);
       });
 
       // RST-015
-      test('RST-015: clear sets lastMutationWasAppend = false', () {
+      test('RST-015: clear sets mutation to fullRebuild', () {
         service.onPointerDown(
           strokeId: 's1', pageId: 'p1', point: makePoint(0, 0),
         );
         service.onPointerUp();
-        expect(service.lastMutationWasAppend, isTrue);
+        expect(service.lastMutationInfo.type, equals(MutationType.append));
 
         service.clear();
-        expect(service.lastMutationWasAppend, isFalse);
-        expect(service.lastAppendedStroke, isNull);
+        expect(service.lastMutationInfo.type, equals(MutationType.fullRebuild));
+        expect(service.lastMutationInfo.appendedStroke, isNull);
       });
 
-      test('lastMutationWasAppend is false initially', () {
-        expect(service.lastMutationWasAppend, isFalse);
-        expect(service.lastAppendedStroke, isNull);
+      test('initial mutation is fullRebuild', () {
+        expect(service.lastMutationInfo.type, equals(MutationType.fullRebuild));
+        expect(service.lastMutationInfo.appendedStroke, isNull);
+        expect(service.lastMutationInfo.dirtyRect, isNull);
+      });
+
+      test('setMutationInfo overrides without bumping version', () {
+        final versionBefore = service.strokeVersion;
+        final dirtyRect = const Rect.fromLTWH(10, 20, 30, 40);
+        service.setMutationInfo(MutationInfo.dirtyRegion(dirtyRect));
+
+        expect(service.lastMutationInfo.type, equals(MutationType.dirtyRegion));
+        expect(service.lastMutationInfo.dirtyRect, equals(dirtyRect));
+        expect(service.strokeVersion, equals(versionBefore));
       });
     });
   });

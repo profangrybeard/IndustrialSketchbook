@@ -1,5 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:industrial_sketchbook/models/pressure_mode.dart';
+import 'package:industrial_sketchbook/services/drawing_service.dart'
+    show MutationInfo;
 import 'package:industrial_sketchbook/widgets/committed_strokes_painter.dart';
 import 'package:industrial_sketchbook/widgets/stroke_raster_cache.dart';
 
@@ -30,7 +32,7 @@ void main() {
         pressureExponent: pressureExponent,
         rasterCache: rasterCache,
         devicePixelRatio: 1.0,
-        lastMutationWasAppend: false,
+        lastMutationInfo: const MutationInfo.fullRebuild(),
       );
     }
 

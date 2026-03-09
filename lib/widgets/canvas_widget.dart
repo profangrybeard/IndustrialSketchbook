@@ -224,10 +224,8 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
                   rasterCache: _strokeRasterCache,
                   devicePixelRatio:
                       MediaQuery.of(context).devicePixelRatio,
-                  lastMutationWasAppend:
-                      drawingService.lastMutationWasAppend,
-                  lastAppendedStroke:
-                      drawingService.lastAppendedStroke,
+                  lastMutationInfo:
+                      drawingService.lastMutationInfo,
                 ),
                 size: Size.infinite,
               ),
@@ -584,6 +582,49 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   }
 
   // ---------------------------------------------------------------------------
+  // Dirty rect helpers (dirty-region cache optimization)
+  // ---------------------------------------------------------------------------
+
+  /// Union two rects, treating [Rect.zero] as empty (identity element).
+  static Rect _unionRect(Rect a, Rect b) {
+    if (a == Rect.zero) return b;
+    if (b == Rect.zero) return a;
+    return a.expandToInclude(b);
+  }
+
+  /// Compute dirty rect for an undo/redo action.
+  ///
+  /// Includes bounding rects of strokes being removed AND strokes being
+  /// restored. For tombstones, includes the bounding rect of the original
+  /// stroke they erased (found via [erasesStrokeId] in committed strokes).
+  Rect _dirtyRectForAction(
+      UndoAction action, DrawingService drawingService) {
+    Rect dirty = Rect.zero;
+
+    for (final s in action.strokesAdded) {
+      if (s.isTombstone && s.erasesStrokeId != null) {
+        // Include the original stroke's rect (it will appear/disappear)
+        for (final cs in drawingService.committedStrokes) {
+          if (cs.id == s.erasesStrokeId) {
+            dirty = _unionRect(dirty, cs.boundingRect);
+            break;
+          }
+        }
+      } else if (!s.isTombstone && s.points.isNotEmpty) {
+        dirty = _unionRect(dirty, s.boundingRect);
+      }
+    }
+
+    for (final s in action.strokesRemoved) {
+      if (!s.isTombstone && s.points.isNotEmpty) {
+        dirty = _unionRect(dirty, s.boundingRect);
+      }
+    }
+
+    return dirty;
+  }
+
+  // ---------------------------------------------------------------------------
   // Standard erasing (stroke subdivision) — Phase 2.5
   // ---------------------------------------------------------------------------
 
@@ -639,7 +680,23 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
     }
 
     if (strokesToAdd.isNotEmpty) {
+      // Compute dirty rect from erased originals' bounding rects
+      Rect dirtyRect = Rect.zero;
+      for (final s in strokesToAdd) {
+        if (s.isTombstone && s.erasesStrokeId != null) {
+          for (final cs in drawingService.committedStrokes) {
+            if (cs.id == s.erasesStrokeId) {
+              dirtyRect = _unionRect(dirtyRect, cs.boundingRect);
+              break;
+            }
+          }
+        }
+      }
+
       drawingService.addCommittedStrokes(strokesToAdd);
+      if (dirtyRect != Rect.zero) {
+        drawingService.setMutationInfo(MutationInfo.dirtyRegion(dirtyRect));
+      }
       drawingService.notifyListeners();
 
       drawingService.pushUndoAction(
@@ -684,6 +741,8 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
     );
 
     drawingService.addCommittedStrokes([tombstone]);
+    drawingService.setMutationInfo(
+        MutationInfo.dirtyRegion(newest.boundingRect));
     drawingService.notifyListeners();
 
     drawingService.pushUndoAction(
@@ -701,6 +760,9 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
     final action = drawingService.popUndo();
     if (action == null) return;
 
+    // Compute dirty rect BEFORE mutations (need access to original strokes)
+    final dirtyRect = _dirtyRectForAction(action, drawingService);
+
     if (action.strokesAdded.isNotEmpty) {
       final addedIds = action.strokesAdded.map((s) => s.id).toSet();
       drawingService.removeCommittedStrokesWhere(
@@ -713,6 +775,11 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       _persistStrokes(action.strokesRemoved);
     }
 
+    // Override with dirty-region mutation info
+    if (dirtyRect != Rect.zero) {
+      drawingService.setMutationInfo(MutationInfo.dirtyRegion(dirtyRect));
+    }
+
     _resetStitchState();
     drawingService.notifyListeners();
   }
@@ -720,6 +787,9 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   void _handleRedo(DrawingService drawingService) {
     final action = drawingService.popRedo();
     if (action == null) return;
+
+    // Compute dirty rect BEFORE mutations
+    final dirtyRect = _dirtyRectForAction(action, drawingService);
 
     if (action.strokesAdded.isNotEmpty) {
       drawingService.addCommittedStrokes(action.strokesAdded);
@@ -731,6 +801,11 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       drawingService.removeCommittedStrokesWhere(
           (s) => removedIds.contains(s.id));
       _deleteStrokes(removedIds.toList());
+    }
+
+    // Override with dirty-region mutation info
+    if (dirtyRect != Rect.zero) {
+      drawingService.setMutationInfo(MutationInfo.dirtyRegion(dirtyRect));
     }
 
     _resetStitchState();

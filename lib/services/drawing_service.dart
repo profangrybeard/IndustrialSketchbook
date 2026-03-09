@@ -11,6 +11,51 @@ import '../models/stroke_point.dart';
 import '../models/tool_type.dart';
 import '../models/undo_action.dart';
 
+// ---------------------------------------------------------------------------
+// Raster cache mutation metadata
+// ---------------------------------------------------------------------------
+
+/// Describes the type of the most recent committed-stroke mutation.
+/// Used by [CommittedStrokesPainter] to select the optimal cache update path.
+enum MutationType {
+  /// A single stroke was appended (pen-up). Cache updates incrementally.
+  append,
+
+  /// Strokes were added/removed with a computable dirty region.
+  /// Only the affected area needs re-rendering.
+  dirtyRegion,
+
+  /// Full cache rebuild required (clear, load, or unknown mutation).
+  fullRebuild,
+}
+
+/// Metadata about the most recent committed-stroke mutation.
+///
+/// Replaces the previous `lastMutationWasAppend` + `lastAppendedStroke` pair
+/// with a richer descriptor that enables dirty-region cache updates.
+class MutationInfo {
+  const MutationInfo.append(this.appendedStroke)
+      : type = MutationType.append,
+        dirtyRect = null;
+
+  const MutationInfo.dirtyRegion(this.dirtyRect)
+      : type = MutationType.dirtyRegion,
+        appendedStroke = null;
+
+  const MutationInfo.fullRebuild()
+      : type = MutationType.fullRebuild,
+        dirtyRect = null,
+        appendedStroke = null;
+
+  final MutationType type;
+
+  /// The dirty rectangle for [MutationType.dirtyRegion] mutations.
+  final Rect? dirtyRect;
+
+  /// The newly appended stroke for [MutationType.append] mutations.
+  final Stroke? appendedStroke;
+}
+
 /// Drawing Pipeline (TDD §4.1, Phase 2.8).
 ///
 /// Runs on the UI thread. Latency critical.
@@ -62,15 +107,17 @@ class DrawingService extends ChangeNotifier {
   // Raster cache mutation tracking
   // ---------------------------------------------------------------------------
 
-  /// Whether the last strokeVersion bump was a simple single-stroke append
-  /// (pen-up). When true, the raster cache can be updated incrementally
-  /// instead of doing a full rebuild.
-  bool _lastMutationWasAppend = false;
-  bool get lastMutationWasAppend => _lastMutationWasAppend;
+  /// Describes the most recent committed-stroke mutation for cache updates.
+  MutationInfo _lastMutationInfo = const MutationInfo.fullRebuild();
+  MutationInfo get lastMutationInfo => _lastMutationInfo;
 
-  /// The stroke appended in the last pen-up, if [lastMutationWasAppend].
-  Stroke? _lastAppendedStroke;
-  Stroke? get lastAppendedStroke => _lastAppendedStroke;
+  /// Override the mutation info without bumping version.
+  ///
+  /// Called by canvas widget after performing mutations to set the correct
+  /// dirty rect for undo/redo/erase operations.
+  void setMutationInfo(MutationInfo info) {
+    _lastMutationInfo = info;
+  }
 
   /// Increment version and recompute erased IDs.
   void _bumpVersion() {
@@ -91,16 +138,14 @@ class DrawingService extends ChangeNotifier {
   /// state changes are made in the same logical operation.
   void addCommittedStrokes(List<Stroke> strokes) {
     committedStrokes.addAll(strokes);
-    _lastMutationWasAppend = false;
-    _lastAppendedStroke = null;
+    _lastMutationInfo = const MutationInfo.fullRebuild();
     _bumpVersion();
   }
 
   /// Remove committed strokes matching [test] and bump version.
   void removeCommittedStrokesWhere(bool Function(Stroke) test) {
     committedStrokes.removeWhere(test);
-    _lastMutationWasAppend = false;
-    _lastAppendedStroke = null;
+    _lastMutationInfo = const MutationInfo.fullRebuild();
     _bumpVersion();
   }
 
@@ -394,8 +439,7 @@ class DrawingService extends ChangeNotifier {
     committedStrokes.add(committed);
     _inflightStroke = null;
     _inflightPoints = [];
-    _lastMutationWasAppend = true;
-    _lastAppendedStroke = committed;
+    _lastMutationInfo = MutationInfo.append(committed);
     _bumpVersion();
     notifyListeners();
     return committed;
@@ -408,8 +452,7 @@ class DrawingService extends ChangeNotifier {
     committedStrokes
       ..clear()
       ..addAll(strokes);
-    _lastMutationWasAppend = false;
-    _lastAppendedStroke = null;
+    _lastMutationInfo = const MutationInfo.fullRebuild();
     _bumpVersion();
     clearUndoHistory();
     notifyListeners();
@@ -422,8 +465,7 @@ class DrawingService extends ChangeNotifier {
     _inflightStroke = null;
     _inflightPoints = [];
     committedStrokes.clear();
-    _lastMutationWasAppend = false;
-    _lastAppendedStroke = null;
+    _lastMutationInfo = const MutationInfo.fullRebuild();
     _bumpVersion();
     notifyListeners();
   }
