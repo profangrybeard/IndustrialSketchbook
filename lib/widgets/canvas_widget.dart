@@ -28,6 +28,7 @@ import 'developer_overlay.dart';
 import 'floating_palette.dart';
 import 'organize_panel.dart';
 import 'page_strip.dart';
+import 'stroke_raster_cache.dart';
 
 const _uuid = Uuid();
 
@@ -49,6 +50,9 @@ class CanvasWidget extends ConsumerStatefulWidget {
 }
 
 class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
+  /// Raster cache for committed strokes. Survives widget rebuilds.
+  final _strokeRasterCache = StrokeRasterCache();
+
   /// Whether a stylus/pen is currently active (for palm rejection).
   bool _penActive = false;
 
@@ -118,6 +122,12 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   void initState() {
     super.initState();
     _restoreLastViewedPage();
+  }
+
+  @override
+  void dispose() {
+    _strokeRasterCache.dispose();
+    super.dispose();
   }
 
   /// Restore the last-viewed page from SharedPreferences on app launch.
@@ -211,6 +221,13 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
                       drawingService.currentLead?.grainIntensity ?? 0.25,
                   pressureExponent:
                       drawingService.pressureCurve.exponent,
+                  rasterCache: _strokeRasterCache,
+                  devicePixelRatio:
+                      MediaQuery.of(context).devicePixelRatio,
+                  lastMutationWasAppend:
+                      drawingService.lastMutationWasAppend,
+                  lastAppendedStroke:
+                      drawingService.lastAppendedStroke,
                 ),
                 size: Size.infinite,
               ),
@@ -548,34 +565,12 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
 
   /// Whether a new stroke should be stitched to the previous one.
   ///
-  /// Returns true if the previous stroke ended recently (< 150ms),
-  /// spatially close (< 20px), and with the same drawing style.
+  /// Disabled: the stitching feature created visible "spider web" bridge
+  /// lines between letters in cursive handwriting. The temporal and spatial
+  /// thresholds were too generous, causing nearly every pen-lift between
+  /// letters to trigger a connecting line.
   bool _shouldStitch(PointerDownEvent event, DrawingService drawingService) {
-    if (_lastCommittedEndPoint == null) return false;
-
-    // Only stitch drawing tools (not eraser)
-    if (drawingService.currentTool == ToolType.eraser) return false;
-
-    // Style must match
-    if (drawingService.currentTool != _lastCommittedTool) return false;
-    if (drawingService.currentColor != _lastCommittedColor) return false;
-    if (drawingService.currentWeight != _lastCommittedWeight) return false;
-
-    // Temporal proximity: within 500ms
-    // Natural handwriting pen-lifts between letters are typically 150–400ms.
-    // The original 150ms threshold was too tight and missed most transitions.
-    final currentTimestamp = event.timeStamp.inMicroseconds;
-    final timeDelta = currentTimestamp - _lastCommittedTimestamp;
-    if (timeDelta > 500000) return false;
-
-    // Spatial proximity: within 50 logical pixels
-    // Generous threshold covers fast cursive strokes where the pen lands
-    // further from the last lift point.
-    final dx = event.localPosition.dx - _lastCommittedEndPoint!.x;
-    final dy = event.localPosition.dy - _lastCommittedEndPoint!.y;
-    if (dx * dx + dy * dy > 2500.0) return false;
-
-    return true;
+    return false;
   }
 
   /// Reset stroke stitching state (on undo/redo/clear).
@@ -795,10 +790,11 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
     // Persist current page settings before leaving
     _persistPageSettings();
 
-    // Clear drawing state
+    // Clear drawing state and raster cache
     drawingService.clear();
     drawingService.clearUndoHistory();
     _resetStitchState();
+    _strokeRasterCache.invalidate();
 
     // Update the provider to the new page
     ref.read(currentPageIdProvider.notifier).state = newPageId;

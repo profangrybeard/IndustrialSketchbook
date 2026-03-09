@@ -58,6 +58,20 @@ class DrawingService extends ChangeNotifier {
   Set<String> _erasedStrokeIds = {};
   Set<String> get erasedStrokeIds => _erasedStrokeIds;
 
+  // ---------------------------------------------------------------------------
+  // Raster cache mutation tracking
+  // ---------------------------------------------------------------------------
+
+  /// Whether the last strokeVersion bump was a simple single-stroke append
+  /// (pen-up). When true, the raster cache can be updated incrementally
+  /// instead of doing a full rebuild.
+  bool _lastMutationWasAppend = false;
+  bool get lastMutationWasAppend => _lastMutationWasAppend;
+
+  /// The stroke appended in the last pen-up, if [lastMutationWasAppend].
+  Stroke? _lastAppendedStroke;
+  Stroke? get lastAppendedStroke => _lastAppendedStroke;
+
   /// Increment version and recompute erased IDs.
   void _bumpVersion() {
     _strokeVersion++;
@@ -77,12 +91,16 @@ class DrawingService extends ChangeNotifier {
   /// state changes are made in the same logical operation.
   void addCommittedStrokes(List<Stroke> strokes) {
     committedStrokes.addAll(strokes);
+    _lastMutationWasAppend = false;
+    _lastAppendedStroke = null;
     _bumpVersion();
   }
 
   /// Remove committed strokes matching [test] and bump version.
   void removeCommittedStrokesWhere(bool Function(Stroke) test) {
     committedStrokes.removeWhere(test);
+    _lastMutationWasAppend = false;
+    _lastAppendedStroke = null;
     _bumpVersion();
   }
 
@@ -376,6 +394,8 @@ class DrawingService extends ChangeNotifier {
     committedStrokes.add(committed);
     _inflightStroke = null;
     _inflightPoints = [];
+    _lastMutationWasAppend = true;
+    _lastAppendedStroke = committed;
     _bumpVersion();
     notifyListeners();
     return committed;
@@ -388,6 +408,8 @@ class DrawingService extends ChangeNotifier {
     committedStrokes
       ..clear()
       ..addAll(strokes);
+    _lastMutationWasAppend = false;
+    _lastAppendedStroke = null;
     _bumpVersion();
     clearUndoHistory();
     notifyListeners();
@@ -400,6 +422,8 @@ class DrawingService extends ChangeNotifier {
     _inflightStroke = null;
     _inflightPoints = [];
     committedStrokes.clear();
+    _lastMutationWasAppend = false;
+    _lastAppendedStroke = null;
     _bumpVersion();
     notifyListeners();
   }
