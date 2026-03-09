@@ -6,6 +6,7 @@ import '../models/pressure_mode.dart';
 import '../models/stroke.dart';
 import '../models/stroke_point.dart';
 import '../models/tool_type.dart';
+import '../utils/perf_metrics.dart';
 
 /// Shared stroke rendering functions used by all canvas layer painters.
 ///
@@ -413,6 +414,8 @@ void _renderStandardStroke(Canvas canvas, Stroke stroke, Paint paint) {
     }
   }
 
+  PerfMetrics.instance.lastStrokeSpinePoints = spinePoints.length;
+  PerfMetrics.instance.lastStrokeChunkCount = 0;
   _drawRibbon(canvas, spinePoints, fillPaint);
   canvas.restore();
 }
@@ -578,9 +581,12 @@ void _renderPencilStroke(
     }
   }
 
+  PerfMetrics.instance.lastStrokeSpinePoints = spinePoints.length;
+
   // Render ribbon in chunks to preserve opacity variation.
   // Each chunk is a short ribbon section with locally-averaged opacity.
   // Chunk size of ~8 spine points balances smoothness vs opacity granularity.
+  int chunkCount = 0;
   const chunkSize = 8;
   for (int start = 0; start < spinePoints.length - 1; start += chunkSize - 1) {
     final end = math.min(start + chunkSize, spinePoints.length);
@@ -600,7 +606,9 @@ void _renderPencilStroke(
       ..color = baseColor.withValues(alpha: avgAlpha.clamp(0.01, 1.0));
 
     _drawRibbon(canvas, chunk, fillPaint);
+    chunkCount++;
   }
+  PerfMetrics.instance.lastStrokeChunkCount = chunkCount;
 
   canvas.restore();
 }

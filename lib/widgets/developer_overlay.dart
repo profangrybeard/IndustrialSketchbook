@@ -2,9 +2,10 @@ import 'package:flutter/material.dart';
 
 import '../config/build_info.dart';
 import '../services/drawing_service.dart';
+import '../utils/perf_metrics.dart';
 
 /// Draggable developer overlay showing build revision and per-sketch memory
-/// stats.
+/// stats plus live rendering performance metrics.
 ///
 /// Defaults to a safe position inside the canvas (60, 60) and can be dragged
 /// anywhere on screen. Uses [GestureDetector] for drag handling — finger/mouse
@@ -67,6 +68,13 @@ class _DeveloperOverlayState extends State<DeveloperOverlay> {
     final estimatedBytes = totalPoints * 32 + strokes.length * 200;
     final memoryStr = _formatBytes(estimatedBytes);
 
+    // Perf metrics
+    final perf = PerfMetrics.instance;
+    final activeMs = (perf.activeStrokePaintAvgUs / 1000).toStringAsFixed(1);
+    final activeMaxMs = (perf.activeStrokePaintMaxUs / 1000).toStringAsFixed(1);
+    final fps = perf.estimatedFps > 0 ? perf.estimatedFps.toStringAsFixed(0) : '-';
+    final committedMs = (perf.committedPaintUs / 1000).toStringAsFixed(1);
+
     return Positioned(
       left: _x,
       top: _y,
@@ -88,7 +96,10 @@ class _DeveloperOverlayState extends State<DeveloperOverlay> {
             'pg ${widget.currentPageIndex + 1}/${widget.totalPages} \u00b7 '
             'ch ${widget.chapterIndex + 1}/${widget.totalChapters} \u00b7 '
             '$visibleStrokes strokes \u00b7 ${_formatNumber(totalPoints)} pts\n'
-            '$memoryStr',
+            '$memoryStr\n'
+            'active: ${activeMs}ms avg / ${activeMaxMs}ms max \u00b7 ~${fps}fps\n'
+            'inflight: ${perf.inflightPointCount}pts \u2192 ${_formatNumber(perf.inflightSpinePointCount)}sp \u00b7 ${perf.inflightSaveLayerCount}lyr\n'
+            'commit: ${committedMs}ms [${perf.committedPaintType}] \u00b7 ${perf.committedStrokeCount}str',
             style: TextStyle(
               color: Colors.white.withValues(alpha: 0.7),
               fontSize: 10,

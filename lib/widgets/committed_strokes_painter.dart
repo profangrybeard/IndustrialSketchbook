@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../models/pressure_mode.dart';
 import '../models/stroke.dart';
 import 'stroke_raster_cache.dart';
+import '../utils/perf_metrics.dart';
 import 'stroke_rendering.dart' as rendering;
 
 /// Layer 2 painter: all committed (finalized) strokes (Phase 2.8).
@@ -65,12 +66,17 @@ class CommittedStrokesPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    final perf = PerfMetrics.instance;
+    final sw = Stopwatch()..start();
     final paramHash =
         Object.hash(pressureMode, grainIntensity, pressureExponent);
 
     // 1. Cache hit — version, size, and params all match. Just blit.
     if (rasterCache.isValid(strokeVersion, size, paramHash)) {
       _drawCachedImage(canvas, size);
+      sw.stop();
+      perf.committedPaintUs = sw.elapsedMicroseconds;
+      perf.committedPaintType = 'hit';
       return;
     }
 
@@ -80,11 +86,29 @@ class CommittedStrokesPainter extends CustomPainter {
         lastMutationWasAppend &&
         lastAppendedStroke != null) {
       _incrementCache(canvas, size, paramHash);
+      sw.stop();
+      perf.committedPaintUs = sw.elapsedMicroseconds;
+      perf.committedPaintType = 'incr';
+      perf.committedStrokeCount = 1;
+      perf.committedSpinePointTotal = perf.lastStrokeSpinePoints;
+      perf.committedSaveLayerCount = perf.lastStrokeChunkCount + 1;
       return;
     }
 
     // 3. Full rebuild — undo, erase, clear, load, or first render.
     _fullRebuildCache(canvas, size, paramHash);
+    sw.stop();
+    perf.committedPaintUs = sw.elapsedMicroseconds;
+    perf.committedPaintType = 'full';
+
+    // Count visible strokes rendered
+    int count = 0;
+    for (final stroke in committedStrokes) {
+      if (stroke.isTombstone) continue;
+      if (erasedStrokeIds.contains(stroke.id)) continue;
+      count++;
+    }
+    perf.committedStrokeCount = count;
   }
 
   /// Blit the cached raster image to the canvas.
