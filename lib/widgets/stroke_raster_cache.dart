@@ -1,5 +1,7 @@
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
+
 /// Caches committed strokes as a raster [ui.Image] to avoid re-rendering
 /// all strokes on every [strokeVersion] change.
 ///
@@ -10,17 +12,21 @@ import 'dart:ui' as ui;
 ///   all strokes from scratch.
 ///
 /// Owned by [_CanvasWidgetState] and passed to [CommittedStrokesPainter].
-class StrokeRasterCache {
+class StrokeRasterCache extends ChangeNotifier {
   ui.Image? _image;
   int _version = -1;
   ui.Size _size = ui.Size.zero;
   int _paramHash = 0;
+  int _buildGeneration = 0;
 
   /// The cached raster image, or null if no cache exists.
   ui.Image? get image => _image;
 
   /// The stroke version this cache was built for.
   int get version => _version;
+
+  /// Monotonic counter incremented on invalidate, for stale async builds.
+  int get buildGeneration => _buildGeneration;
 
   /// Whether the cache is valid for the given version, size, and params.
   bool isValid(int version, ui.Size size, int paramHash) =>
@@ -43,6 +49,7 @@ class StrokeRasterCache {
     _version = version;
     _size = size;
     _paramHash = paramHash;
+    notifyListeners();
   }
 
   /// Invalidate the cache (e.g. on page switch). Disposes the image.
@@ -50,11 +57,14 @@ class StrokeRasterCache {
     _image?.dispose();
     _image = null;
     _version = -1;
+    _buildGeneration++;
   }
 
   /// Dispose the cache and free GPU memory.
+  @override
   void dispose() {
     _image?.dispose();
     _image = null;
+    super.dispose();
   }
 }

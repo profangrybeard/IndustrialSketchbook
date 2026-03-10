@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -68,6 +69,9 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
 
   /// Whether the organize panel (Layer 4c) is currently visible.
   bool _showOrganizePanel = false;
+
+  /// Generation counter — cancels stale stroke-loading microtasks on page switch.
+  int _loadGeneration = 0;
 
   /// The current page ID, read from the Riverpod provider.
   String get _pageId => ref.read(currentPageIdProvider);
@@ -201,20 +205,23 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       final dbAsync = ref.watch(databaseServiceProvider);
       dbAsync.whenData((db) {
         _strokesLoaded = true;
+        final gen = _loadGeneration;
         // Schedule after this build frame to avoid setState-during-build
         // (loadStrokes calls notifyListeners which triggers rebuild)
         Future.microtask(() async {
-          if (!mounted) return;
+          if (!mounted || gen != _loadGeneration) return;
 
           // Load strokes
           final strokes = await db.getStrokesByPageId(_pageId);
-          if (mounted && strokes.isNotEmpty) {
+          if (!mounted || gen != _loadGeneration) return;
+          if (strokes.isNotEmpty) {
             drawingService.loadStrokes(strokes);
           }
 
           // Load page settings (grid style, spacing, paper color)
           final page = await db.getPage(_pageId);
-          if (mounted && page != null) {
+          if (!mounted || gen != _loadGeneration) return;
+          if (page != null) {
             setState(() {
               _gridStyle = GridStyle.fromPageStyle(page.style);
               _gridSpacing = page.gridConfig?.spacing ?? 25.0;
@@ -360,10 +367,36 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
             onRedo: () => _handleRedo(drawingService),
             onClear: () => _handleClear(drawingService),
             isSignedIn: ref.watch(isSignedInProvider),
-            onSyncTap: () {
-              Navigator.of(context).push(
+            onSyncTap: () async {
+              await Navigator.of(context).push(
                 MaterialPageRoute(builder: (_) => const SyncSettingsPage()),
               );
+              // After returning from sync page, reload strokes and structure
+              // in case a sync pulled new data from another device.
+              if (!mounted) return;
+
+              // Refresh notebook/chapter/page providers for structural changes
+              ref.invalidate(chaptersProvider);
+              ref.invalidate(globalPageListProvider);
+              ref.invalidate(pagesForChapterProvider);
+
+              final db = ref.read(databaseServiceProvider).value;
+              if (db != null) {
+                final pageId = _pageId;
+                final strokes = await db.getStrokesByPageId(pageId);
+                debugPrint('Post-sync reload: pageId=$pageId, '
+                    'found ${strokes.length} strokes in DB');
+                if (mounted) {
+                  final ds = ref.read(drawingServiceProvider);
+                  final oldCount = ds.committedStrokes.length;
+                  ds.loadStrokes(strokes);
+                  _strokeRasterCache.invalidate();
+                  debugPrint('Post-sync reload: was $oldCount strokes, '
+                      'now ${strokes.length}, version=${ds.strokeVersion}');
+                  // Force full widget rebuild
+                  setState(() {});
+                }
+              }
             },
           ),
 
@@ -891,6 +924,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   /// resets all transient state, then triggers a reload for the new page.
   void _switchToPage(String newPageId, DrawingService drawingService) {
     if (newPageId == _pageId) return;
+    _loadGeneration++; // Cancel any in-flight stroke loads
 
     // Persist current page settings before leaving
     _persistPageSettings();

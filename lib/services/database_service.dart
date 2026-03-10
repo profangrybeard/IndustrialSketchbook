@@ -652,4 +652,116 @@ class DatabaseService {
       orderBy: 'created_at ASC',
     );
   }
+
+  // ---------------------------------------------------------------------------
+  // Sync — Phase 3.2 (Google Drive journal sync)
+  // ---------------------------------------------------------------------------
+
+  /// Get all strokes that haven't been synced yet (synced = 0).
+  ///
+  /// Returns both regular strokes and tombstones — both need uploading.
+  Future<List<Stroke>> getUnsyncedStrokes() async {
+    final maps = await db.query(
+      'strokes',
+      where: 'synced = ?',
+      whereArgs: [0],
+      orderBy: 'created_at ASC',
+    );
+    return maps.map(Stroke.fromDbMap).toList();
+  }
+
+  /// Batch-mark strokes as synced after successful upload.
+  ///
+  /// Handles SQLite's 999 variable limit by chunking.
+  Future<void> markStrokesSynced(List<String> strokeIds) async {
+    if (strokeIds.isEmpty) return;
+    const chunkSize = 999;
+    await db.transaction((txn) async {
+      for (var i = 0; i < strokeIds.length; i += chunkSize) {
+        final chunk = strokeIds.sublist(
+            i, i + chunkSize > strokeIds.length ? strokeIds.length : i + chunkSize);
+        final placeholders = List.filled(chunk.length, '?').join(',');
+        await txn.rawUpdate(
+          'UPDATE strokes SET synced = 1 WHERE id IN ($placeholders)',
+          chunk,
+        );
+      }
+    });
+  }
+
+  /// Mark ALL strokes as unsynced (for force push — re-upload everything).
+  Future<void> markAllStrokesUnsynced() async {
+    await db.rawUpdate('UPDATE strokes SET synced = 0');
+  }
+
+    /// Insert a stroke only if its UUID doesn't already exist (for pull/merge).
+  ///
+  /// Returns true if the stroke was inserted, false if it already existed.
+  Future<bool> insertStrokeIfNotExists(Stroke stroke) async {
+    final existing = await db.query(
+      'strokes',
+      columns: ['id'],
+      where: 'id = ?',
+      whereArgs: [stroke.id],
+      limit: 1,
+    );
+    if (existing.isNotEmpty) return false;
+
+    // Insert stroke and page_stroke_order in a transaction
+    await db.transaction((txn) async {
+      await txn.insert('strokes', stroke.toDbMap(),
+          conflictAlgorithm: ConflictAlgorithm.ignore);
+
+      // Only add to page_stroke_order if not a tombstone
+      if (!stroke.isTombstone) {
+        final maxOrder = await txn.rawQuery(
+          'SELECT COALESCE(MAX(sort_order), -1) AS max_order '
+          'FROM page_stroke_order WHERE page_id = ?',
+          [stroke.pageId],
+        );
+        final nextOrder =
+            ((maxOrder.first['max_order'] as int?) ?? -1) + 1;
+        await txn.insert('page_stroke_order', {
+          'page_id': stroke.pageId,
+          'stroke_id': stroke.id,
+          'sort_order': nextOrder,
+        }, conflictAlgorithm: ConflictAlgorithm.ignore);
+      }
+    });
+
+    // Mark as synced since it came from a remote journal
+    await markStrokeSynced(stroke.id);
+    return true;
+  }
+
+  /// Get all notebooks.
+  Future<List<Notebook>> getAllNotebooks() async {
+    final maps = await db.query('notebooks');
+    return maps.map(Notebook.fromDbMap).toList();
+  }
+
+  /// Get all chapters across all notebooks.
+  Future<List<Chapter>> getAllChapters() async {
+    final maps = await db.query('chapters', orderBy: 'sort_order ASC');
+    return maps.map(Chapter.fromDbMap).toList();
+  }
+
+  /// Get all pages across all chapters.
+  Future<List<SketchPage>> getAllPages() async {
+    final maps = await db.query('pages', orderBy: 'page_number ASC');
+    return maps.map(SketchPage.fromDbMap).toList();
+  }
+
+  /// Upsert a chapter (insert or replace — for pull/merge).
+  Future<void> upsertChapter(Chapter chapter) async {
+    await db.insert('chapters', chapter.toDbMap(),
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  /// Upsert a page (insert or replace — for pull/merge).
+  Future<void> upsertPage(SketchPage page) async {
+    await db.insert('pages', page.toDbMap(),
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
 }

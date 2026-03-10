@@ -32,7 +32,7 @@ class CommittedStrokesPainter extends CustomPainter {
     required this.devicePixelRatio,
     required this.lastMutationWasAppend,
     this.lastAppendedStroke,
-  });
+  }) : super(repaint: rasterCache);
 
   /// All committed strokes for the current page.
   final List<Stroke> committedStrokes;
@@ -149,6 +149,7 @@ class CommittedStrokesPainter extends CustomPainter {
         pressureMode: pressureMode,
         grainIntensity: grainIntensity,
         pressureExponent: pressureExponent,
+        targetArcLength: rendering.replayTargetArcLength,
       );
     }
 
@@ -161,7 +162,13 @@ class CommittedStrokesPainter extends CustomPainter {
     _drawCachedImage(canvas, size);
   }
 
-  /// Full cache rebuild: re-render all visible strokes.
+  /// Full cache rebuild: render strokes directly, then build cache async.
+  ///
+  /// Instead of blocking the UI thread with toImageSync(), we:
+  /// 1. Record strokes to a Picture (fast display-list build)
+  /// 2. Draw the Picture to the canvas immediately (non-blocking)
+  /// 3. Call picture.toImage() asynchronously (GPU rasterization off UI thread)
+  /// 4. When the image is ready, update rasterCache -> notifyListeners -> repaint
   void _fullRebuildCache(Canvas canvas, Size size, int paramHash) {
     final dpr = devicePixelRatio;
     final recorder = ui.PictureRecorder();
@@ -177,16 +184,32 @@ class CommittedStrokesPainter extends CustomPainter {
         pressureMode: pressureMode,
         grainIntensity: grainIntensity,
         pressureExponent: pressureExponent,
+        targetArcLength: rendering.replayTargetArcLength,
       );
     }
 
     final picture = recorder.endRecording();
-    final newImage = picture.toImageSync(
-        (size.width * dpr).ceil(), (size.height * dpr).ceil());
-    picture.dispose();
-    rasterCache.update(newImage, strokeVersion, size, paramHash);
 
-    _drawCachedImage(canvas, size);
+    // Draw picture to canvas immediately (undo DPR since canvas is logical)
+    canvas.save();
+    canvas.scale(1.0 / dpr, 1.0 / dpr);
+    canvas.drawPicture(picture);
+    canvas.restore();
+
+    // Async cache build - GPU rasterization happens off the UI thread
+    final gen = rasterCache.buildGeneration;
+    final version = strokeVersion;
+    final w = (size.width * dpr).ceil();
+    final h = (size.height * dpr).ceil();
+
+    picture.toImage(w, h).then((image) {
+      picture.dispose();
+      if (gen != rasterCache.buildGeneration) {
+        image.dispose();
+        return;
+      }
+      rasterCache.update(image, version, size, paramHash);
+    });
   }
 
   @override
