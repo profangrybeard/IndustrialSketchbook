@@ -24,8 +24,8 @@ dependencies:
   # On-device handwriting OCR — vector mode, no server needed (TDD §4.2)
   google_mlkit_digital_ink_recognition: ^0.13.0
 
-  # Cloud sync, auth, object storage for gallery images (TDD §4.3)
-  supabase_flutter: ^2.3.0
+  # Google Sign-In for Drive sync (Phase 3)
+  google_sign_in: ^6.2.1
 
   # Camera and photo library access for gallery import (TDD §3.5)
   image_picker: ^1.0.5

@@ -1,4 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:uuid/uuid.dart';
 
 import '../models/chapter.dart';
 import '../models/notebook.dart';
@@ -39,6 +41,22 @@ final databaseServiceProvider = FutureProvider<DatabaseService>((ref) async {
 
   return db;
 });
+
+/// Unique device identifier for sync (Phase 3).
+///
+/// Generated once per app install and stored in SharedPreferences.
+/// Used to identify which device uploaded a sync journal.
+final deviceIdProvider = FutureProvider<String>((ref) async {
+  final prefs = await SharedPreferences.getInstance();
+  const key = 'sync_device_id';
+  var deviceId = prefs.getString(key);
+  if (deviceId == null) {
+    deviceId = const Uuid().v4();
+    await prefs.setString(key, deviceId);
+  }
+  return deviceId;
+});
+
 
 /// Create the default notebook, chapter, and page if they don't already exist.
 Future<void> _seedDefaults(DatabaseService db) async {

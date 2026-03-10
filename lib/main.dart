@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'providers/auth_provider.dart';
 import 'providers/database_provider.dart';
 import 'widgets/canvas_widget.dart';
 
@@ -38,7 +39,11 @@ class AppShell extends ConsumerWidget {
     final dbAsync = ref.watch(databaseServiceProvider);
 
     return dbAsync.when(
-      data: (_) => const CanvasPlaceholder(),
+      data: (_) {
+        // Attempt silent sign-in on launch (fire-and-forget)
+        ref.read(authServiceProvider).silentSignIn();
+        return const CanvasPlaceholder();
+      },
       loading: () => const Scaffold(
         body: Center(
           child: Column(

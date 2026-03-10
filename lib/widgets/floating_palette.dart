@@ -41,6 +41,8 @@ class FloatingPalette extends StatefulWidget {
     required this.onUndo,
     required this.onRedo,
     required this.onClear,
+    this.isSignedIn = false,
+    this.onSyncTap,
   });
 
   final ToolType currentTool;
@@ -70,6 +72,8 @@ class FloatingPalette extends StatefulWidget {
   final VoidCallback onUndo;
   final VoidCallback onRedo;
   final VoidCallback onClear;
+  final bool isSignedIn;
+  final VoidCallback? onSyncTap;
 
   @override
   State<FloatingPalette> createState() => _FloatingPaletteState();
@@ -255,6 +259,16 @@ class _FloatingPaletteState extends State<FloatingPalette> {
               setState(() => _expandedPanel = null);
               _confirmClear(context);
             },
+          ),
+          const _PaletteDivider(),
+
+          // Cloud sync / settings
+          _PaletteIcon(
+            icon: widget.isSignedIn ? Icons.cloud_done : Icons.cloud_off_outlined,
+            tooltip: 'Sync Settings',
+            isActive: widget.isSignedIn,
+            activeColor: const Color(0xFF4285F4),
+            onTap: widget.onSyncTap ?? () {},
           ),
         ],
       ),

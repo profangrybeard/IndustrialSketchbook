@@ -17,6 +17,7 @@ import '../models/stroke_point.dart';
 import '../models/tool_type.dart';
 import '../models/undo_action.dart';
 import '../providers/database_provider.dart';
+import '../providers/auth_provider.dart';
 import '../providers/drawing_provider.dart';
 import '../providers/notebook_provider.dart';
 import '../services/drawing_service.dart';
@@ -29,6 +30,7 @@ import 'floating_palette.dart';
 import 'organize_panel.dart';
 import 'page_strip.dart';
 import 'stroke_raster_cache.dart';
+import 'sync_settings_page.dart';
 
 const _uuid = Uuid();
 
@@ -357,6 +359,12 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
             onUndo: () => _handleUndo(drawingService),
             onRedo: () => _handleRedo(drawingService),
             onClear: () => _handleClear(drawingService),
+            isSignedIn: ref.watch(isSignedInProvider),
+            onSyncTap: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const SyncSettingsPage()),
+              );
+            },
           ),
 
           // Developer overlay + page navigation — global page list (Layer 4b)
