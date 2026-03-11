@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../models/pressure_mode.dart';
 import '../models/stroke.dart';
+import '../utils/perf_metrics.dart';
 import 'stroke_rendering.dart' as rendering;
 
 /// Layer 3 painter: in-flight stroke + eraser cursor (Phase 2.8).
@@ -56,10 +57,16 @@ class ActiveStrokePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    final perf = PerfMetrics.instance;
+    perf.markFrameStart();
+
     final inflight = inflightStroke;
     if (inflight != null) {
+      perf.inflightPointCount = inflight.points.length;
+
       // Skip single-point rendering to avoid dot artifact
       if (!(suppressSinglePoint && inflight.points.length == 1)) {
+        final sw = Stopwatch()..start();
         rendering.renderStroke(
           canvas,
           inflight,
@@ -67,6 +74,10 @@ class ActiveStrokePainter extends CustomPainter {
           grainIntensity: grainIntensity,
           pressureExponent: pressureExponent,
         );
+        sw.stop();
+        perf.recordActiveStrokePaint(sw.elapsedMicroseconds);
+        perf.inflightSpinePointCount = perf.lastStrokeSpinePoints;
+        perf.inflightSaveLayerCount = perf.lastStrokeChunkCount + 1;
       }
     }
 

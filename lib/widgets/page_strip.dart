@@ -67,11 +67,12 @@ class PageStrip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final accentColor = Color(chapterColor);
+    final bottomInset = MediaQuery.of(context).viewPadding.bottom;
 
     return Positioned(
-      bottom: 12,
-      left: 0,
-      right: 0,
+      bottom: 12 + bottomInset,
+      left: 8,
+      right: 8,
       child: Center(
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
@@ -91,9 +92,9 @@ class PageStrip extends StatelessWidget {
 
               // Global page indicator
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
+                padding: const EdgeInsets.symmetric(horizontal: 4),
                 child: Text(
-                  'Page ${currentPage + 1} / $totalPages',
+                  '${currentPage + 1}/$totalPages',
                   style: _labelStyle,
                 ),
               ),
@@ -112,26 +113,22 @@ class PageStrip extends StatelessWidget {
               Container(
                 width: 8,
                 height: 8,
-                margin: const EdgeInsets.only(right: 6),
+                margin: const EdgeInsets.only(right: 4),
                 decoration: BoxDecoration(
                   color: accentColor,
                   shape: BoxShape.circle,
                 ),
               ),
-              Padding(
-                padding: const EdgeInsets.only(right: 4),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 120),
-                  child: Text(
-                    chapterTitle,
-                    style: _labelStyle,
-                    overflow: TextOverflow.ellipsis,
-                    maxLines: 1,
-                  ),
+              Flexible(
+                child: Text(
+                  chapterTitle,
+                  style: _labelStyle,
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
                 ),
               ),
               Padding(
-                padding: const EdgeInsets.only(right: 4),
+                padding: const EdgeInsets.only(left: 4),
                 child: Text(
                   'ch ${chapterIndex + 1}/$totalChapters',
                   style: _labelStyle.copyWith(

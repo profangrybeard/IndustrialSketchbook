@@ -6,6 +6,7 @@ import '../models/pressure_mode.dart';
 import '../models/stroke.dart';
 import '../models/stroke_point.dart';
 import '../models/tool_type.dart';
+import '../utils/perf_metrics.dart';
 
 /// Shared stroke rendering functions used by all canvas layer painters.
 ///
@@ -101,17 +102,18 @@ const int _minSubdivisions = 4;
 /// visual quality. Caps cost for very fast strokes.
 const int _maxSubdivisions = 50;
 
-/// Target arc length in logical pixels per subdivision step.
-/// Smaller = smoother ribbon edges, more computation.
-/// 0.5px gives maximum fidelity on large tablets.
-const double _targetArcLength = 0.5;
+/// Default target arc length for live drawing (maximum fidelity).
+const double _defaultTargetArcLength = 0.5;
+
+/// Coarser arc length for cached/replay rendering (6x faster, near-identical).
+const double replayTargetArcLength = 3.0;
 
 /// Compute adaptive subdivision count based on segment chord length.
 /// Long segments (fast strokes on big tablets) get more subdivisions;
 /// short segments (slow drawing) stay at minimum.
 /// Capped at [_maxSubdivisions] — beyond that, edge smoothing handles it.
-int _adaptiveSubdivisions(double chordLength) {
-  final n = (chordLength / _targetArcLength).ceil();
+int _adaptiveSubdivisions(double chordLength, {double targetArcLength = _defaultTargetArcLength}) {
+  final n = (chordLength / targetArcLength).ceil();
   if (n < _minSubdivisions) return _minSubdivisions;
   if (n > _maxSubdivisions) return _maxSubdivisions;
   return n;
@@ -275,6 +277,7 @@ void renderStroke(
   required PressureMode pressureMode,
   required double grainIntensity,
   required double pressureExponent,
+  double targetArcLength = _defaultTargetArcLength,
 }) {
   final points = stroke.renderPoints;
   if (points.isEmpty) return;
@@ -331,9 +334,10 @@ void renderStroke(
   // Multi-point stroke
   if (isPencil) {
     _renderPencilStroke(canvas, stroke, paint, baseColor, baseAlpha,
-        pressureMode, grainIntensity, pressureExponent);
+        pressureMode, grainIntensity, pressureExponent,
+        targetArcLength: targetArcLength);
   } else {
-    _renderStandardStroke(canvas, stroke, paint);
+    _renderStandardStroke(canvas, stroke, paint, targetArcLength: targetArcLength);
   }
 }
 
@@ -354,7 +358,7 @@ void renderStroke(
 /// encoded in the polygon outline.
 ///
 /// Round end caps are drawn as semicircles at the first and last points.
-void _renderStandardStroke(Canvas canvas, Stroke stroke, Paint paint) {
+void _renderStandardStroke(Canvas canvas, Stroke stroke, Paint paint, {double targetArcLength = _defaultTargetArcLength}) {
   final points = stroke.renderPoints;
 
   // Isolate stroke rendering to prevent alpha compounding
@@ -413,6 +417,8 @@ void _renderStandardStroke(Canvas canvas, Stroke stroke, Paint paint) {
     }
   }
 
+  PerfMetrics.instance.lastStrokeSpinePoints = spinePoints.length;
+  PerfMetrics.instance.lastStrokeChunkCount = 0;
   _drawRibbon(canvas, spinePoints, fillPaint);
   canvas.restore();
 }
@@ -435,7 +441,9 @@ void _renderPencilStroke(
   double baseAlpha,
   PressureMode pressureMode,
   double grainIntensity,
-  double pressureExponent,
+  double pressureExponent, {
+  double targetArcLength = _defaultTargetArcLength,
+}
 ) {
   final points = stroke.renderPoints;
 
@@ -578,9 +586,12 @@ void _renderPencilStroke(
     }
   }
 
+  PerfMetrics.instance.lastStrokeSpinePoints = spinePoints.length;
+
   // Render ribbon in chunks to preserve opacity variation.
   // Each chunk is a short ribbon section with locally-averaged opacity.
   // Chunk size of ~8 spine points balances smoothness vs opacity granularity.
+  int chunkCount = 0;
   const chunkSize = 8;
   for (int start = 0; start < spinePoints.length - 1; start += chunkSize - 1) {
     final end = math.min(start + chunkSize, spinePoints.length);
@@ -600,7 +611,9 @@ void _renderPencilStroke(
       ..color = baseColor.withValues(alpha: avgAlpha.clamp(0.01, 1.0));
 
     _drawRibbon(canvas, chunk, fillPaint);
+    chunkCount++;
   }
+  PerfMetrics.instance.lastStrokeChunkCount = chunkCount;
 
   canvas.restore();
 }

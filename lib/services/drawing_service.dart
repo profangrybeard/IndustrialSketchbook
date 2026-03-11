@@ -144,6 +144,19 @@ class DrawingService extends ChangeNotifier {
     _bumpVersion();
   }
 
+  /// Optimized erase path: add strokes and incrementally update erasedIds.
+  ///
+  /// Avoids the O(N) [_recomputeErasedIds] scan that [addCommittedStrokes]
+  /// triggers. The caller provides the set of newly erased stroke IDs so
+  /// we can just add them to the existing set.
+  void addCommittedStrokesForErase(
+      List<Stroke> strokes, Set<String> newlyErasedIds) {
+    committedStrokes.addAll(strokes);
+    _erasedStrokeIds.addAll(newlyErasedIds);
+    _strokeVersion++;
+    _lastMutationInfo = const MutationInfo.fullRebuild();
+  }
+
   /// Remove committed strokes matching [test] and bump version.
   void removeCommittedStrokesWhere(bool Function(Stroke) test) {
     committedStrokes.removeWhere(test);
