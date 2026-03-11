@@ -180,6 +180,52 @@ class Stroke {
         synced: json['synced'] as bool? ?? false,
       );
 
+  /// Compact sync serialization — excludes raw [points], ships only
+  /// [renderData] (normalized 0.0–1.0). ~95% smaller than [toJson].
+  ///
+  /// Used by v2 sync journals. Tombstones omit renderData entirely
+  /// since they carry no visual data.
+  Map<String, dynamic> toSyncJson() => {
+        'id': id,
+        'pageId': pageId,
+        'layerId': layerId,
+        'tool': tool.toJson(),
+        'color': color,
+        'weight': weight,
+        'opacity': opacity,
+        if (renderData != null && !isTombstone)
+          'renderData': renderData!.map((rp) => rp.toJson()).toList(),
+        'createdAt': createdAt.toUtc().toIso8601String(),
+        'isTombstone': isTombstone,
+        'erasesStrokeId': erasesStrokeId,
+      };
+
+  /// Reconstruct a stroke from a v2 sync journal payload.
+  ///
+  /// Only [renderData] is present — [points] is empty. The rendering
+  /// pipeline uses [renderPoints] (which falls back to raw points for
+  /// local strokes). For synced strokes, the renderer will need to
+  /// consume renderData directly in a future phase.
+  factory Stroke.fromSyncJson(Map<String, dynamic> json) => Stroke(
+        id: json['id'] as String,
+        pageId: json['pageId'] as String,
+        layerId: json['layerId'] as String? ?? 'default',
+        tool: ToolType.fromJson(json['tool'] as String),
+        color: json['color'] as int,
+        weight: (json['weight'] as num).toDouble(),
+        opacity: (json['opacity'] as num).toDouble(),
+        points: const [], // No raw points in sync payloads
+        renderData: json['renderData'] != null
+            ? (json['renderData'] as List)
+                .map((rp) => RenderPoint.fromJson(rp as Map<String, dynamic>))
+                .toList()
+            : null,
+        createdAt: DateTime.parse(json['createdAt'] as String),
+        isTombstone: json['isTombstone'] as bool? ?? false,
+        erasesStrokeId: json['erasesStrokeId'] as String?,
+        synced: true, // Synced strokes arrived via sync
+      );
+
   /// Convert to a SQLite row map. Points are stored as binary blobs.
   Map<String, dynamic> toDbMap() => {
         'id': id,

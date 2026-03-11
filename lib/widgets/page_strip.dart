@@ -21,6 +21,7 @@ class PageStrip extends StatelessWidget {
     this.onPrevPage,
     this.onNextPage,
     this.onOrganize,
+    this.isLoading = false,
     super.key,
   });
 
@@ -57,6 +58,10 @@ class PageStrip extends StatelessWidget {
   /// Open the organize panel (null = button hidden).
   final VoidCallback? onOrganize;
 
+  /// Whether strokes are currently loading for the active page.
+  /// Shows a thin progress bar above the strip.
+  final bool isLoading;
+
   static const _labelStyle = TextStyle(
     color: Color.fromRGBO(255, 255, 255, 0.85),
     fontSize: 12,
@@ -74,7 +79,31 @@ class PageStrip extends StatelessWidget {
       left: 8,
       right: 8,
       child: Center(
-        child: Container(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Thin loading progress bar — animates while strokes load
+            AnimatedOpacity(
+              opacity: isLoading ? 1.0 : 0.0,
+              duration: const Duration(milliseconds: 150),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(2),
+                child: SizedBox(
+                  width: 140,
+                  height: 3,
+                  child: isLoading
+                      ? const LinearProgressIndicator(
+                          backgroundColor: Color.fromRGBO(100, 150, 255, 0.2),
+                          valueColor: AlwaysStoppedAnimation<Color>(
+                            Color.fromRGBO(70, 130, 255, 0.9),
+                          ),
+                        )
+                      : const SizedBox.shrink(),
+                ),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Container(
           padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
           decoration: BoxDecoration(
             color: Colors.black.withValues(alpha: 0.5),
@@ -164,6 +193,8 @@ class PageStrip extends StatelessWidget {
               ),
             ],
           ),
+        ),
+          ],
         ),
       ),
     );

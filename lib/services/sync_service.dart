@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/chapter.dart';
 import '../models/notebooks_snapshot.dart';
+import '../models/render_point.dart';
 import '../models/sketch_page.dart';
 import '../models/sync_journal.dart';
 import '../models/stroke.dart';
@@ -56,6 +57,12 @@ class SyncEngine extends ChangeNotifier {
   double get _localCanvasWidth {
     final view = ui.PlatformDispatcher.instance.views.first;
     return view.physicalSize.width / view.devicePixelRatio;
+  }
+
+  /// Logical canvas height of this device (for v2 renderData denormalization).
+  double get _localCanvasHeight {
+    final view = ui.PlatformDispatcher.instance.views.first;
+    return view.physicalSize.height / view.devicePixelRatio;
   }
 
   /// Initialize — load persisted last sync time.
@@ -144,6 +151,9 @@ class SyncEngine extends ChangeNotifier {
   }
 
   /// Push unsynced strokes to Drive. Returns count of strokes pushed.
+  ///
+  /// Phase 4: uses v2 compact format (renderData only, gzip compressed).
+  /// Tombstone compaction omits stroke+tombstone pairs from the same batch.
   Future<int> _push() async {
     _state = const SyncPushing(phase: 'Checking unsynced strokes...');
     notifyListeners();
@@ -155,45 +165,107 @@ class SyncEngine extends ChangeNotifier {
       return 0;
     }
 
+    // Phase 4: tombstone compaction — if a stroke and its tombstone are
+    // both in the push batch, omit both (the net effect is no change).
+    final compacted = _compactTombstones(strokes);
+    final compactedCount = strokes.length - compacted.length;
+    if (compactedCount > 0) {
+      debugPrint('Push: compacted $compactedCount strokes '
+          '(${compactedCount ~/ 2} stroke+tombstone pairs)');
+    }
+
     int pushed = 0;
     // Split into batches of 500
-    for (var i = 0; i < strokes.length; i += _maxBatchSize) {
-      final end = (i + _maxBatchSize > strokes.length)
-          ? strokes.length
+    for (var i = 0; i < compacted.length; i += _maxBatchSize) {
+      final end = (i + _maxBatchSize > compacted.length)
+          ? compacted.length
           : i + _maxBatchSize;
-      final batch = strokes.sublist(i, end);
+      final batch = compacted.sublist(i, end);
 
-      final localWidth = _localCanvasWidth;
       final journal = SyncJournal(
+        version: 2,
         deviceId: _deviceId,
         createdAt: DateTime.now().toUtc().toIso8601String(),
         strokes: batch,
-        canvasWidth: localWidth > 0 ? localWidth : null,
       );
 
       final filename =
-          'journal_${_deviceId}_${DateTime.now().millisecondsSinceEpoch}.json';
-      await _drive.uploadJson(filename, journal.toJson());
-      await _db.markStrokesSynced(batch.map((s) => s.id).toList());
+          'journal_${_deviceId}_${DateTime.now().millisecondsSinceEpoch}.json.gz';
+      await _drive.uploadGzip(filename, journal.toJson());
+
+      // Mark the original strokes (including compacted ones) as synced
+      final batchIds = batch.map((s) => s.id).toList();
+      await _db.markStrokesSynced(batchIds);
       pushed += batch.length;
       _state = SyncPushing(
         phase: 'Uploading strokes...',
         pushed: pushed,
-        total: strokes.length,
+        total: compacted.length,
       );
       notifyListeners();
       debugPrint('Push: uploaded batch of ${batch.length} strokes ($filename)');
+    }
+
+    // Mark compacted strokes as synced too (they were omitted from upload
+    // but shouldn't be re-uploaded next time)
+    if (compactedCount > 0) {
+      final allIds = strokes.map((s) => s.id).toList();
+      final pushedIds = compacted.map((s) => s.id).toSet();
+      final compactedIds =
+          allIds.where((id) => !pushedIds.contains(id)).toList();
+      if (compactedIds.isNotEmpty) {
+        await _db.markStrokesSynced(compactedIds);
+      }
     }
 
     // Upload structure snapshot after strokes
     _state = SyncPushing(
       phase: 'Uploading structure...',
       pushed: pushed,
-      total: strokes.length,
+      total: compacted.length,
     );
     notifyListeners();
     await _pushNotebooksSnapshot();
     return pushed;
+  }
+
+  /// Remove stroke+tombstone pairs from a batch.
+  ///
+  /// If a tombstone targets a stroke that's also in the batch, both are
+  /// omitted — the net effect is zero (the stroke was drawn and erased
+  /// in the same sync cycle).
+  List<Stroke> _compactTombstones(List<Stroke> strokes) {
+    // Build a set of stroke IDs targeted by tombstones in this batch
+    final tombstoneTargets = <String>{};
+    final tombstoneIds = <String>{};
+    for (final s in strokes) {
+      if (s.isTombstone && s.erasesStrokeId != null) {
+        tombstoneTargets.add(s.erasesStrokeId!);
+        tombstoneIds.add(s.id);
+      }
+    }
+
+    // Check which targets actually exist in this batch
+    final strokeIds = strokes.map((s) => s.id).toSet();
+    final compactableTargets = tombstoneTargets.intersection(strokeIds);
+    if (compactableTargets.isEmpty) return strokes;
+
+    // Find tombstone IDs that target compactable strokes
+    final compactableTombstones = <String>{};
+    for (final s in strokes) {
+      if (s.isTombstone &&
+          s.erasesStrokeId != null &&
+          compactableTargets.contains(s.erasesStrokeId)) {
+        compactableTombstones.add(s.id);
+      }
+    }
+
+    // Filter out both the compacted strokes and their tombstones
+    return strokes
+        .where((s) =>
+            !compactableTargets.contains(s.id) &&
+            !compactableTombstones.contains(s.id))
+        .toList();
   }
 
   /// Upload notebooks.json — full structure snapshot (last-write-wins).
@@ -258,6 +330,9 @@ class SyncEngine extends ChangeNotifier {
     notifyListeners();
 
     // 4. Download and merge each journal (per-stroke error handling)
+    // Phase 4: v2 journals (.json.gz) use downloadGzip; v1 (.json) use downloadJson.
+    // v2 journals have normalized coordinates — no scaling needed.
+    // v1 journals may need cross-device canvasWidth scaling (legacy).
     final localWidth = _localCanvasWidth;
     int imported = 0;
     int skipped = 0;
@@ -265,27 +340,42 @@ class SyncEngine extends ChangeNotifier {
     int journalsDone = 0;
     for (final file in newJournals) {
       try {
-        final json = await _drive.downloadJson(file.id);
+        // Detect format from filename extension
+        final isGzip = file.name.endsWith('.json.gz');
+        final json = isGzip
+            ? await _drive.downloadGzip(file.id)
+            : await _drive.downloadJson(file.id);
         final journal = SyncJournal.fromJson(json);
         debugPrint('Pull: processing ${file.name} '
-            '(${journal.strokes.length} strokes)');
+            '(v${journal.version}, ${journal.strokes.length} strokes)');
 
-        // Compute scale factor if source canvas width differs
-        final sourceWidth = journal.canvasWidth;
-        final needsScale = sourceWidth != null &&
+        // v1 journals: legacy scaling if canvas widths differ
+        // v2 journals: coordinates are normalized 0.0–1.0, no scaling needed
+        final needsScale = journal.version < 2 &&
+            journal.canvasWidth != null &&
             localWidth > 0 &&
-            (sourceWidth - localWidth).abs() > 10;
+            (journal.canvasWidth! - localWidth).abs() > 10;
         final scaleFactor =
-            needsScale ? localWidth / sourceWidth! : 1.0;
+            needsScale ? localWidth / journal.canvasWidth! : 1.0;
         if (needsScale) {
-          debugPrint('Pull: scaling ${sourceWidth.toStringAsFixed(0)}'
+          debugPrint('Pull: v1 scaling '
+              '${journal.canvasWidth!.toStringAsFixed(0)}'
               ' -> ${localWidth.toStringAsFixed(0)}'
               ' (factor=${scaleFactor.toStringAsFixed(3)})');
         }
 
         for (final stroke in journal.strokes) {
           try {
-            final s = needsScale ? _scaleStroke(stroke, scaleFactor) : stroke;
+            // v1: legacy coordinate scaling
+            // v2: denormalize renderData (0.0–1.0) to device-pixel points
+            Stroke s;
+            if (needsScale) {
+              s = _scaleStroke(stroke, scaleFactor);
+            } else if (journal.version >= 2) {
+              s = _denormalizeStroke(stroke);
+            } else {
+              s = stroke;
+            }
             final inserted = await _db.insertStrokeIfNotExists(s);
             if (inserted) {
               imported++;
@@ -372,6 +462,46 @@ class SyncEngine extends ChangeNotifier {
       isTombstone: stroke.isTombstone,
       erasesStrokeId: stroke.erasesStrokeId,
       synced: stroke.synced,
+    );
+  }
+
+  /// Denormalize a v2 synced stroke: convert renderData (0.0–1.0) into
+  /// device-pixel [StrokePoint] objects so the rendering pipeline can display
+  /// them via the [renderPoints] bridge getter.
+  ///
+  /// If the stroke has no renderData (e.g. tombstones), returns it unchanged.
+  Stroke _denormalizeStroke(Stroke stroke) {
+    final rd = stroke.renderData;
+    if (rd == null || rd.isEmpty) return stroke;
+
+    final w = _localCanvasWidth;
+    final h = _localCanvasHeight;
+    final denormalized = rd
+        .map((rp) => StrokePoint(
+              x: rp.x * w,
+              y: rp.y * h,
+              pressure: rp.pressure,
+              tiltX: 0.0,
+              tiltY: 0.0,
+              twist: 0.0,
+              timestamp: 0,
+            ))
+        .toList();
+
+    return Stroke(
+      id: stroke.id,
+      pageId: stroke.pageId,
+      layerId: stroke.layerId,
+      tool: stroke.tool,
+      color: stroke.color,
+      weight: stroke.weight,
+      opacity: stroke.opacity,
+      points: denormalized,
+      renderData: rd,
+      createdAt: stroke.createdAt,
+      isTombstone: stroke.isTombstone,
+      erasesStrokeId: stroke.erasesStrokeId,
+      synced: true,
     );
   }
 

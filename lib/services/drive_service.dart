@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
@@ -136,6 +137,81 @@ class DriveService {
     }
 
     return jsonDecode(response.body) as Map<String, dynamic>;
+  }
+
+  /// Upload a gzip-compressed JSON file to appDataFolder (Phase 4).
+  ///
+  /// Compresses [content] with gzip before uploading. The filename should
+  /// end with `.json.gz` so the pull path knows to decompress.
+  Future<String> uploadGzip(
+      String filename, Map<String, dynamic> content) async {
+    final headers = await _headers();
+    final boundary =
+        'sync_boundary_${DateTime.now().millisecondsSinceEpoch}';
+    final metadata = jsonEncode({
+      'name': filename,
+      'parents': ['appDataFolder'],
+    });
+    final jsonBytes = utf8.encode(jsonEncode(content));
+    final compressed = gzip.encode(jsonBytes);
+
+    // Build multipart: metadata (JSON) + body (binary gzip)
+    final metadataPart = [
+      '--$boundary',
+      'Content-Type: application/json; charset=UTF-8',
+      '',
+      metadata,
+      '--$boundary',
+      'Content-Type: application/gzip',
+      'Content-Transfer-Encoding: binary',
+      '',
+    ].join('\r\n');
+    final trailer = '\r\n--$boundary--';
+
+    // Assemble as raw bytes to handle binary gzip payload
+    final body = <int>[
+      ...utf8.encode(metadataPart),
+      ...utf8.encode('\r\n'),
+      ...compressed,
+      ...utf8.encode(trailer),
+    ];
+
+    final response = await http.post(
+      Uri.parse('$_uploadUrl?uploadType=multipart'),
+      headers: {
+        ...headers,
+        'Content-Type': 'multipart/related; boundary=$boundary',
+        'Content-Length': body.length.toString(),
+      },
+      body: body,
+    );
+
+    if (response.statusCode != 200) {
+      throw DriveException('Upload gzip failed (${response.statusCode})',
+          response.body);
+    }
+
+    final json = jsonDecode(response.body) as Map<String, dynamic>;
+    return json['id'] as String;
+  }
+
+  /// Download and decompress a gzip-compressed JSON file.
+  Future<Map<String, dynamic>> downloadGzip(String fileId) async {
+    final headers = await _headers();
+    final response = await http.get(
+      Uri.parse('$_filesUrl/$fileId?alt=media'),
+      headers: headers,
+    );
+
+    if (response.statusCode != 200) {
+      throw DriveException(
+          'Download gzip failed (${response.statusCode})',
+          response.body);
+    }
+
+    final decompressed = gzip.decode(response.bodyBytes);
+    final jsonStr = utf8.decode(decompressed);
+    return jsonDecode(jsonStr) as Map<String, dynamic>;
   }
 
   /// Delete a file by ID.

@@ -74,9 +74,13 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
   /// Blocks stroke loading until the correct page ID is set.
   bool _pageRestored = false;
 
-  /// Whether strokes have been loaded from the database for the current page.
+  /// Whether stroke loading has been kicked off for the current page.
   /// Prevents re-loading on every widget rebuild. Reset on page switch.
   bool _strokesLoaded = false;
+
+  /// Whether the page is fully ready (strokes loaded + settings applied).
+  /// Controls the loading UI (grey veil, progress bar). Reset on page switch.
+  bool _pageReady = false;
 
   /// Whether the organize panel (Layer 4c) is currently visible.
   bool _showOrganizePanel = false;
@@ -256,7 +260,19 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
             drawingService.loadStrokes(strokes);
           }
 
-          // Phase 3: dismiss snapshot overlay after strokes are loaded.
+          // Load page settings (grid style, spacing, paper color)
+          final page = await db.getPage(_pageId);
+          if (!mounted || gen != _loadGeneration) return;
+          setState(() {
+            if (page != null) {
+              _gridStyle = GridStyle.fromPageStyle(page.style);
+              _gridSpacing = page.gridConfig?.spacing ?? 25.0;
+              _paperColor = Color(page.paperColor);
+            }
+            _pageReady = true;
+          });
+
+          // Phase 3: dismiss snapshot overlay after page is fully ready.
           // Schedule after paint frame so the committed strokes painter
           // has a chance to render before we fade out the snapshot.
           if (_showingSnapshot && mounted) {
@@ -265,17 +281,6 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
               setState(() {
                 _showingSnapshot = false;
               });
-            });
-          }
-
-          // Load page settings (grid style, spacing, paper color)
-          final page = await db.getPage(_pageId);
-          if (!mounted || gen != _loadGeneration) return;
-          if (page != null) {
-            setState(() {
-              _gridStyle = GridStyle.fromPageStyle(page.style);
-              _gridSpacing = page.gridConfig?.spacing ?? 25.0;
-              _paperColor = Color(page.paperColor);
             });
           }
         });
@@ -395,6 +400,21 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
               ),
             ),
           ),
+
+          // Page loading overlay — grey veil while strokes load.
+          // Blocks interaction by absorbing all pointer events.
+          if (!_pageReady)
+            Positioned.fill(
+              child: AnimatedOpacity(
+                opacity: _pageReady ? 0.0 : 1.0,
+                duration: const Duration(milliseconds: 150),
+                child: AbsorbPointer(
+                  child: Container(
+                    color: const Color.fromRGBO(0, 0, 0, 0.15),
+                  ),
+                ),
+              ),
+            ),
 
           // Floating palette layer (on top)
           FloatingPalette(
@@ -525,6 +545,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                       chapterColor: currentEntry.chapterColor,
                       chapterIndex: currentEntry.chapterIndex,
                       totalChapters: currentEntry.totalChapters,
+                      isLoading: !_pageReady,
                       onPrevPage: safeIndex > 0
                           ? () => _switchToPage(
                                 globalPages[safeIndex - 1].page.id,
@@ -1149,9 +1170,10 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
       });
     }
 
-    // Reset load flag so the next build loads the new page's data
+    // Reset load flags so the next build loads the new page's data
     setState(() {
       _strokesLoaded = false;
+      _pageReady = false;
       _gridStyle = GridStyle.none;
       _gridSpacing = 25.0;
       _paperColor = BackgroundPainter.defaultPaperColor;
