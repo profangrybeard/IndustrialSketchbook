@@ -883,6 +883,98 @@ void main() {
         expect(service.strokeVersion, equals(versionBefore));
       });
     });
+
+    // -----------------------------------------------------------------------
+    // Phase 2: Canvas dimensions & coordinate normalization
+    // -----------------------------------------------------------------------
+    group('canvas dimensions & normalized renderData', () {
+      test('setCanvasDimensions stores width and height', () {
+        service.setCanvasDimensions(1920.0, 1080.0);
+        expect(service.canvasWidth, equals(1920.0));
+        expect(service.canvasHeight, equals(1080.0));
+      });
+
+      test('pen-up normalizes renderData to 0.0-1.0 when canvas dims set', () {
+        service.setCanvasDimensions(1000.0, 500.0);
+        service.onPointerDown(
+          strokeId: 'norm-1',
+          pageId: 'page-1',
+          point: makePoint(500.0, 250.0, timestamp: 0),
+        );
+        service.onPointerMove(makePoint(750.0, 375.0, timestamp: 1000));
+        service.onPointerMove(makePoint(1000.0, 500.0, timestamp: 2000));
+
+        final committed = service.onPointerUp();
+        expect(committed, isNotNull);
+        expect(committed!.renderData, isNotNull);
+        expect(committed.renderData!.isNotEmpty, isTrue);
+
+        // All renderData coordinates should be in normalized 0.0-1.0 range
+        for (final rp in committed.renderData!) {
+          expect(rp.x, greaterThanOrEqualTo(0.0));
+          expect(rp.x, lessThanOrEqualTo(1.0));
+          expect(rp.y, greaterThanOrEqualTo(0.0));
+          expect(rp.y, lessThanOrEqualTo(1.0));
+          expect(rp.pressure, greaterThanOrEqualTo(0.0));
+          expect(rp.pressure, lessThanOrEqualTo(1.0));
+        }
+      });
+
+      test('renderData contains device coords when canvas dims not set', () {
+        // Canvas dims default to 0.0 — fallback to device coords
+        service.onPointerDown(
+          strokeId: 'no-dims-1',
+          pageId: 'page-1',
+          point: makePoint(500.0, 250.0, timestamp: 0),
+        );
+        service.onPointerMove(makePoint(750.0, 375.0, timestamp: 1000));
+
+        final committed = service.onPointerUp();
+        expect(committed, isNotNull);
+        expect(committed!.renderData, isNotNull);
+
+        // Without canvas dims, coordinates stay in device space (>1.0)
+        final hasDeviceCoords = committed.renderData!
+            .any((rp) => rp.x > 1.0 || rp.y > 1.0);
+        expect(hasDeviceCoords, isTrue);
+      });
+
+      test('raw points remain in device coordinates after normalization', () {
+        service.setCanvasDimensions(1000.0, 500.0);
+        service.onPointerDown(
+          strokeId: 'raw-1',
+          pageId: 'page-1',
+          point: makePoint(500.0, 250.0, timestamp: 0),
+        );
+        service.onPointerMove(makePoint(750.0, 375.0, timestamp: 1000));
+
+        final committed = service.onPointerUp();
+        expect(committed, isNotNull);
+
+        // Raw points should still be in device coordinates
+        expect(committed!.points[0].x, closeTo(500.0, 0.01));
+        expect(committed.points[0].y, closeTo(250.0, 0.01));
+        expect(committed.points[1].x, closeTo(750.0, 0.01));
+        expect(committed.points[1].y, closeTo(375.0, 0.01));
+      });
+
+      test('renderPoints getter returns raw points (not normalized)', () {
+        service.setCanvasDimensions(1000.0, 500.0);
+        service.onPointerDown(
+          strokeId: 'bridge-1',
+          pageId: 'page-1',
+          point: makePoint(500.0, 250.0, timestamp: 0),
+        );
+        service.onPointerMove(makePoint(750.0, 375.0, timestamp: 1000));
+
+        final committed = service.onPointerUp();
+        expect(committed, isNotNull);
+
+        // renderPoints (bridge getter) should return raw points
+        expect(committed!.renderPoints[0].x, closeTo(500.0, 0.01));
+        expect(committed.renderPoints[0].y, closeTo(250.0, 0.01));
+      });
+    });
   });
 }
 

@@ -9,6 +9,7 @@ import 'package:uuid/uuid.dart';
 
 import '../models/chapter.dart';
 import '../models/eraser_mode.dart';
+import '../models/render_point.dart';
 import '../models/grid_config.dart';
 import '../models/grid_style.dart';
 import '../models/page_style.dart';
@@ -22,6 +23,7 @@ import '../providers/auth_provider.dart';
 import '../providers/drawing_provider.dart';
 import '../providers/notebook_provider.dart';
 import '../services/drawing_service.dart';
+import '../utils/curve_fitter.dart';
 import '../utils/stroke_splitter.dart';
 import 'active_stroke_painter.dart';
 import 'background_painter.dart';
@@ -249,6 +251,12 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
         });
       });
     }
+
+    // Phase 2: feed canvas dimensions to DrawingService for coordinate
+    // normalization. The canvas fills the full Scaffold body, so
+    // MediaQuery.size gives us the logical pixel dimensions.
+    final screenSize = MediaQuery.of(context).size;
+    drawingService.setCanvasDimensions(screenSize.width, screenSize.height);
 
     return Scaffold(
       body: Stack(
@@ -811,6 +819,13 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
       newlyErasedIds.add(stroke.id);
 
       for (final segment in segments) {
+        // Phase 2: re-fit split segments into normalized RenderPoints.
+        final cw = drawingService.canvasWidth;
+        final ch = drawingService.canvasHeight;
+        final hasCanvasDims = cw > 0 && ch > 0;
+        final fitted = CurveFitter.chaikinSmooth(
+          CurveFitter.simplify(segment),
+        );
         strokesToAdd.add(Stroke(
           id: _uuid.v4(),
           pageId: _pageId,
@@ -820,6 +835,13 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
           weight: stroke.weight,
           opacity: stroke.opacity,
           points: segment,
+          renderData: fitted
+              .map((sp) => hasCanvasDims
+                  ? RenderPoint.fromStrokePoint(sp,
+                      canvasWidth: cw, canvasHeight: ch)
+                  : RenderPoint(
+                      x: sp.x, y: sp.y, pressure: sp.pressure))
+              .toList(),
           createdAt: DateTime.now().toUtc(),
         ));
       }
