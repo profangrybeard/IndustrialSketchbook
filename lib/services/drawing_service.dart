@@ -7,6 +7,7 @@ import '../models/eraser_mode.dart';
 import '../models/pencil_lead.dart';
 import '../models/pressure_curve.dart';
 import '../models/pressure_mode.dart';
+import '../models/render_point.dart';
 import '../models/stroke.dart';
 import '../models/stroke_point.dart';
 import '../models/tool_type.dart';
@@ -440,6 +441,11 @@ class DrawingService extends ChangeNotifier {
     // List.of() creates an independent copy so the committed stroke
     // is not affected if _inflightPoints is reused.
     final frozenPoints = List<StrokePoint>.of(_inflightPoints);
+    // Phase 1: curve fit then convert to RenderPoints (device coords for now).
+    // Phase 2 will normalize to 0.0-1.0 using canvas dimensions.
+    final fittedSp = CurveFitter.chaikinSmooth(
+      CurveFitter.simplify(frozenPoints),
+    );
     final committed = Stroke(
       id: stroke.id,
       pageId: stroke.pageId,
@@ -449,9 +455,13 @@ class DrawingService extends ChangeNotifier {
       weight: stroke.weight,
       opacity: stroke.opacity,
       points: frozenPoints,
-      fittedPoints: CurveFitter.chaikinSmooth(
-        CurveFitter.simplify(frozenPoints),
-      ),
+      renderData: fittedSp
+          .map((sp) => RenderPoint(
+                x: sp.x,
+                y: sp.y,
+                pressure: sp.pressure,
+              ))
+          .toList(),
       createdAt: DateTime.now().toUtc(),
     );
 

@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 import 'dart:ui';
 
+import 'render_point.dart';
 import 'stroke_point.dart';
 import 'tool_type.dart';
 
@@ -38,17 +39,20 @@ class Stroke {
   /// The raw point samples (Level 0). Minimum one point (tap = single point stroke).
   final List<StrokePoint> points;
 
-  /// Simplified point set (Level 1) produced by [CurveFitter] on pen-up.
+  /// Compact normalized render points produced by curve fitting on pen-up.
   ///
-  /// Null for legacy strokes or strokes that haven't been fitted yet.
-  /// When non-null, the renderer uses this instead of [points] for
-  /// visually identical output with fewer points through the Catmull-Rom
-  /// pipeline.
-  final List<StrokePoint>? fittedPoints;
+  /// This is the primary data for rendering and sync. Coordinates are
+  /// normalized 0.0–1.0 relative to canvas dimensions. Null for tombstones
+  /// or strokes created before the v4 overhaul.
+  final List<RenderPoint>? renderData;
 
-  /// The points the renderer should use: [fittedPoints] if available,
-  /// otherwise falls back to raw [points].
-  List<StrokePoint> get renderPoints => fittedPoints ?? points;
+  /// Bridge getter for the rendering pipeline (Phase 1 compat).
+  ///
+  /// Always returns raw [points] for display — no visible smoothing.
+  /// [renderData] is stored for sync and future Phase 2 rendering
+  /// but never shown to the user until we can make the transition
+  /// imperceptible.
+  List<StrokePoint> get renderPoints => points;
 
   /// Set at pen-up. Not modified thereafter.
   final DateTime createdAt;
@@ -71,7 +75,7 @@ class Stroke {
     required this.weight,
     required this.opacity,
     required this.points,
-    this.fittedPoints,
+    this.renderData,
     required this.createdAt,
     this.isTombstone = false,
     this.erasesStrokeId,
@@ -146,8 +150,8 @@ class Stroke {
         'weight': weight,
         'opacity': opacity,
         'points': points.map((p) => p.toJson()).toList(),
-        if (fittedPoints != null)
-          'fittedPoints': fittedPoints!.map((p) => p.toJson()).toList(),
+        if (renderData != null)
+          'renderData': renderData!.map((rp) => rp.toJson()).toList(),
         'createdAt': createdAt.toUtc().toIso8601String(),
         'isTombstone': isTombstone,
         'erasesStrokeId': erasesStrokeId,
@@ -165,9 +169,9 @@ class Stroke {
         points: (json['points'] as List)
             .map((p) => StrokePoint.fromJson(p as Map<String, dynamic>))
             .toList(),
-        fittedPoints: json['fittedPoints'] != null
-            ? (json['fittedPoints'] as List)
-                .map((p) => StrokePoint.fromJson(p as Map<String, dynamic>))
+        renderData: json['renderData'] != null
+            ? (json['renderData'] as List)
+                .map((rp) => RenderPoint.fromJson(rp as Map<String, dynamic>))
                 .toList()
             : null,
         createdAt: DateTime.parse(json['createdAt'] as String),
@@ -176,7 +180,7 @@ class Stroke {
         synced: json['synced'] as bool? ?? false,
       );
 
-  /// Convert to a SQLite row map. Points are stored as a binary blob.
+  /// Convert to a SQLite row map. Points are stored as binary blobs.
   Map<String, dynamic> toDbMap() => {
         'id': id,
         'page_id': pageId,
@@ -185,9 +189,9 @@ class Stroke {
         'color': color,
         'weight': weight,
         'opacity': opacity,
-        'points_blob': StrokePoint.packAll(points),
-        'fitted_points_blob':
-            fittedPoints != null ? StrokePoint.packAll(fittedPoints!) : null,
+        'raw_points_blob': StrokePoint.packAll(points),
+        'render_points_blob':
+            renderData != null ? RenderPoint.packAll(renderData!) : null,
         'created_at': createdAt.toUtc().toIso8601String(),
         'is_tombstone': isTombstone ? 1 : 0,
         'erases_stroke_id': erasesStrokeId,
@@ -203,9 +207,9 @@ class Stroke {
         color: map['color'] as int,
         weight: (map['weight'] as num).toDouble(),
         opacity: (map['opacity'] as num).toDouble(),
-        points: StrokePoint.unpackAll(map['points_blob'] as Uint8List),
-        fittedPoints: map['fitted_points_blob'] != null
-            ? StrokePoint.unpackAll(map['fitted_points_blob'] as Uint8List)
+        points: StrokePoint.unpackAll(map['raw_points_blob'] as Uint8List),
+        renderData: map['render_points_blob'] != null
+            ? RenderPoint.unpackAll(map['render_points_blob'] as Uint8List)
             : null,
         createdAt: DateTime.parse(map['created_at'] as String),
         isTombstone: (map['is_tombstone'] as int) == 1,

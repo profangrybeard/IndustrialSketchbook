@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
@@ -7,7 +8,6 @@ import '../models/chapter.dart';
 import '../models/notebook.dart';
 import '../models/sketch_page.dart';
 import '../models/stroke.dart';
-import '../models/stroke_point.dart';
 
 /// SQLite database service (TDD §2, Appendix A).
 ///
@@ -42,9 +42,8 @@ class DatabaseService {
 
     _db = await openDatabase(
       dbPath,
-      version: 3,
+      version: 4,
       onCreate: _onCreate,
-      onUpgrade: _onUpgrade,
       onConfigure: (db) async {
         // Enable WAL mode for better concurrent read/write performance
         // Use rawQuery because journal_mode returns a result set
@@ -55,26 +54,9 @@ class DatabaseService {
     );
   }
 
-  /// Migrate schema between versions.
-  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
-    if (oldVersion < 2) {
-      // v2: Add paper_color column to pages table (Layer 2 — page settings)
-      await db.execute(
-        'ALTER TABLE pages ADD COLUMN paper_color INTEGER NOT NULL DEFAULT ${0xFFF5F5F0}',
-      );
-    }
-    if (oldVersion < 3) {
-      // v3: Level 1 curve fitting + archive flag
-      await db.execute(
-        'ALTER TABLE strokes ADD COLUMN fitted_points_blob BLOB',
-      );
-      await db.execute(
-        'ALTER TABLE chapters ADD COLUMN archive_raw_data INTEGER NOT NULL DEFAULT 0',
-      );
-    }
-  }
-
-  /// Create all tables (TDD Appendix A).
+  /// Create all tables — v4 clean-slate schema.
+  ///
+  /// No migration path from v1–v3 (user approved data wipe for perf overhaul).
   Future<void> _onCreate(Database db, int version) async {
     final batch = db.batch();
 
@@ -119,6 +101,7 @@ class DatabaseService {
     ''');
 
     // The event log — source of truth (TDD §2)
+    // v4: raw_points_blob (archive) + render_points_blob (compact normalized)
     batch.execute('''
       CREATE TABLE strokes (
         id TEXT PRIMARY KEY,
@@ -128,8 +111,8 @@ class DatabaseService {
         color INTEGER NOT NULL,
         weight REAL NOT NULL,
         opacity REAL NOT NULL,
-        points_blob BLOB NOT NULL,
-        fitted_points_blob BLOB,
+        raw_points_blob BLOB NOT NULL,
+        render_points_blob BLOB,
         created_at TEXT NOT NULL,
         is_tombstone INTEGER NOT NULL DEFAULT 0,
         erases_stroke_id TEXT,
@@ -201,6 +184,19 @@ class DatabaseService {
         status TEXT NOT NULL DEFAULT 'pending',
         retry_count INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL
+      )
+    ''');
+
+    // Raster snapshots for instant page switching (Phase 3)
+    batch.execute('''
+      CREATE TABLE page_snapshots (
+        page_id TEXT PRIMARY KEY,
+        png_blob BLOB NOT NULL,
+        stroke_version INTEGER NOT NULL,
+        width INTEGER NOT NULL,
+        height INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (page_id) REFERENCES pages(id)
       )
     ''');
 
@@ -775,4 +771,51 @@ class DatabaseService {
         conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
+  // ---------------------------------------------------------------------------
+  // Page Snapshots (Phase 3 — instant page switching)
+  // ---------------------------------------------------------------------------
+
+  /// Save or update a page's raster snapshot (PNG).
+  Future<void> savePageSnapshot({
+    required String pageId,
+    required Uint8List pngBlob,
+    required int strokeVersion,
+    required int width,
+    required int height,
+  }) async {
+    await db.insert(
+      'page_snapshots',
+      {
+        'page_id': pageId,
+        'png_blob': pngBlob,
+        'stroke_version': strokeVersion,
+        'width': width,
+        'height': height,
+        'updated_at': DateTime.now().toUtc().toIso8601String(),
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  /// Get a page's snapshot PNG blob, or null if none exists.
+  Future<Uint8List?> getPageSnapshot(String pageId) async {
+    final rows = await db.query(
+      'page_snapshots',
+      columns: ['png_blob'],
+      where: 'page_id = ?',
+      whereArgs: [pageId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return rows.first['png_blob'] as Uint8List;
+  }
+
+  /// Delete a page's snapshot (e.g. on page clear or page delete).
+  Future<void> deletePageSnapshot(String pageId) async {
+    await db.delete(
+      'page_snapshots',
+      where: 'page_id = ?',
+      whereArgs: [pageId],
+    );
+  }
 }

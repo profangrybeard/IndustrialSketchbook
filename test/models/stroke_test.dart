@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:ui';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:industrial_sketchbook/models/render_point.dart';
 import 'package:industrial_sketchbook/models/stroke.dart';
 import 'package:industrial_sketchbook/models/stroke_point.dart';
 import 'package:industrial_sketchbook/models/tool_type.dart';
@@ -175,10 +176,10 @@ void main() {
     });
 
     // -----------------------------------------------------------------------
-    // FittedPoints serialization
+    // renderData serialization (v4: normalized RenderPoints)
     // -----------------------------------------------------------------------
-    group('fittedPoints serialization', () {
-      test('JSON round-trip with fittedPoints', () {
+    group('renderData serialization', () {
+      test('JSON round-trip with renderData', () {
         final rawPoints = [
           makePoint(0, 0, timestamp: 0),
           makePoint(10, 5, timestamp: 1000),
@@ -186,48 +187,45 @@ void main() {
           makePoint(30, 5, timestamp: 3000),
           makePoint(40, 0, timestamp: 4000),
         ];
-        final fitted = [rawPoints.first, rawPoints.last];
+        final render = [
+          const RenderPoint(x: 0.0, y: 0.0, pressure: 0.5),
+          const RenderPoint(x: 1.0, y: 0.5, pressure: 0.5),
+        ];
 
         final original = Stroke(
-          id: 'fitted-test',
+          id: 'render-test',
           pageId: 'page-1',
           tool: ToolType.pen,
           color: 0xFF000000,
           weight: 2.0,
           opacity: 1.0,
           points: rawPoints,
-          fittedPoints: fitted,
+          renderData: render,
           createdAt: DateTime.utc(2024, 1, 15),
         );
 
         final json = original.toJson();
-        expect(json.containsKey('fittedPoints'), isTrue);
+        expect(json.containsKey('renderData'), isTrue);
 
         final restored = Stroke.fromJson(json);
-        expect(restored.fittedPoints, isNotNull);
-        expect(restored.fittedPoints!.length, equals(2));
+        expect(restored.renderData, isNotNull);
+        expect(restored.renderData!.length, equals(2));
         expect(restored.points.length, equals(5));
-        expect(restored.renderPoints.length, equals(2));
       });
 
-      test('JSON round-trip without fittedPoints (null)', () {
+      test('JSON round-trip without renderData (null)', () {
         final original = makeStroke();
         final json = original.toJson();
-        expect(json.containsKey('fittedPoints'), isFalse);
+        expect(json.containsKey('renderData'), isFalse);
 
         final restored = Stroke.fromJson(json);
-        expect(restored.fittedPoints, isNull);
-        // renderPoints falls back to raw points
-        expect(restored.renderPoints.length, equals(restored.points.length));
+        expect(restored.renderData, isNull);
       });
 
-      test('renderPoints returns fittedPoints when available', () {
-        final rawPoints = [
-          makePoint(0, 0),
-          makePoint(10, 10),
-          makePoint(20, 20),
+      test('renderData stores normalized coordinates', () {
+        final render = [
+          const RenderPoint(x: 0.25, y: 0.75, pressure: 0.6),
         ];
-        final fitted = [rawPoints.first, rawPoints.last];
 
         final stroke = Stroke(
           id: 's1',
@@ -236,57 +234,74 @@ void main() {
           color: 0xFF000000,
           weight: 2.0,
           opacity: 1.0,
-          points: rawPoints,
-          fittedPoints: fitted,
+          points: [makePoint(250, 750)],
+          renderData: render,
           createdAt: DateTime.utc(2024, 1, 1),
         );
 
-        expect(stroke.renderPoints, same(fitted));
-        expect(stroke.renderPoints.length, equals(2));
+        expect(stroke.renderData, same(render));
+        expect(stroke.renderData!.first.x, closeTo(0.25, 0.001));
+        expect(stroke.renderData!.first.y, closeTo(0.75, 0.001));
       });
 
-      test('renderPoints falls back to points when fittedPoints is null', () {
+      test('renderData is null when not provided', () {
         final stroke = makeStroke();
-        expect(stroke.fittedPoints, isNull);
-        expect(stroke.renderPoints, same(stroke.points));
+        expect(stroke.renderData, isNull);
       });
 
-      test('DB map round-trip with fittedPoints', () {
+      test('DB map round-trip with renderData', () {
         final rawPoints = [
           makePoint(0, 0, timestamp: 0),
           makePoint(50, 50, timestamp: 1000),
           makePoint(100, 0, timestamp: 2000),
         ];
-        final fitted = [rawPoints.first, rawPoints.last];
+        final render = [
+          const RenderPoint(x: 0.0, y: 0.0, pressure: 0.5),
+          const RenderPoint(x: 0.5, y: 0.5, pressure: 0.7),
+          const RenderPoint(x: 1.0, y: 0.0, pressure: 0.5),
+        ];
 
         final original = Stroke(
-          id: 'db-fitted',
+          id: 'db-render',
           pageId: 'page-1',
           tool: ToolType.pencil,
           color: 0xFF333333,
           weight: 3.0,
           opacity: 0.8,
           points: rawPoints,
-          fittedPoints: fitted,
+          renderData: render,
           createdAt: DateTime.utc(2024, 6, 1),
         );
 
         final dbMap = original.toDbMap();
-        expect(dbMap['fitted_points_blob'], isNotNull);
+        expect(dbMap['render_points_blob'], isNotNull);
 
         final restored = Stroke.fromDbMap(dbMap);
-        expect(restored.fittedPoints, isNotNull);
-        expect(restored.fittedPoints!.length, equals(2));
+        expect(restored.renderData, isNotNull);
+        expect(restored.renderData!.length, equals(3));
         expect(restored.points.length, equals(3));
+        // Verify render point values survive binary round-trip
+        expect(restored.renderData![1].x, closeTo(0.5, 0.001));
+        expect(restored.renderData![1].pressure, closeTo(0.7, 0.001));
       });
 
-      test('DB map round-trip without fittedPoints', () {
+      test('DB map round-trip without renderData', () {
         final original = makeStroke();
         final dbMap = original.toDbMap();
-        expect(dbMap['fitted_points_blob'], isNull);
+        expect(dbMap['render_points_blob'], isNull);
 
         final restored = Stroke.fromDbMap(dbMap);
-        expect(restored.fittedPoints, isNull);
+        expect(restored.renderData, isNull);
+      });
+
+      test('tombstone has no renderData', () {
+        final tombstone = Stroke.tombstone(
+          id: 'ts-1',
+          pageId: 'page-1',
+          targetStrokeId: 'target-1',
+          createdAt: DateTime.utc(2024, 1, 1),
+        );
+        expect(tombstone.renderData, isNull);
       });
     });
 
