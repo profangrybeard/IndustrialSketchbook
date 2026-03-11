@@ -1,7 +1,10 @@
+import 'dart:typed_data';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:industrial_sketchbook/models/chapter.dart';
 import 'package:industrial_sketchbook/models/notebook.dart';
+import 'package:industrial_sketchbook/models/render_point.dart';
 import 'package:industrial_sketchbook/models/sketch_page.dart';
 import 'package:industrial_sketchbook/models/stroke.dart';
 import 'package:industrial_sketchbook/models/stroke_point.dart';
@@ -45,6 +48,7 @@ void main() {
         expect(tableNames, contains('image_pins'));
         expect(tableNames, contains('ocr_snapshots'));
         expect(tableNames, contains('sync_queue'));
+        expect(tableNames, contains('page_snapshots'));
       });
 
       test('FTS5 search_index virtual table is created', () async {
@@ -262,6 +266,148 @@ void main() {
         // will add another entry — this tests the stroke table only)
         final retrieved = await db.getStroke('stroke-dup');
         expect(retrieved, isNotNull);
+      });
+
+      test('stroke with render_points_blob round-trips through DB', () async {
+        final rawPoints = [
+          StrokePoint(
+            x: 100.0, y: 200.0, pressure: 0.5,
+            tiltX: 0.0, tiltY: 0.0, twist: 0.0, timestamp: 1000),
+          StrokePoint(
+            x: 300.0, y: 400.0, pressure: 0.7,
+            tiltX: 0.0, tiltY: 0.0, twist: 0.0, timestamp: 2000),
+        ];
+        final renderData = [
+          const RenderPoint(x: 0.1, y: 0.2, pressure: 0.5),
+          const RenderPoint(x: 0.3, y: 0.4, pressure: 0.7),
+        ];
+
+        final stroke = Stroke(
+          id: 'stroke-render',
+          pageId: 'page-1',
+          tool: ToolType.pen,
+          color: 0xFF000000,
+          weight: 2.0,
+          opacity: 1.0,
+          points: rawPoints,
+          renderData: renderData,
+          createdAt: DateTime.utc(2024, 1, 15),
+        );
+
+        await db.insertStroke(stroke);
+        final retrieved = await db.getStroke('stroke-render');
+
+        expect(retrieved, isNotNull);
+        expect(retrieved!.renderData, isNotNull);
+        expect(retrieved.renderData!.length, equals(2));
+        expect(retrieved.renderData![0].x, closeTo(0.1, 0.001));
+        expect(retrieved.renderData![0].y, closeTo(0.2, 0.001));
+        expect(retrieved.renderData![1].pressure, closeTo(0.7, 0.001));
+        // Raw points also survive
+        expect(retrieved.points.length, equals(2));
+        expect(retrieved.points[0].x, closeTo(100.0, 0.01));
+      });
+
+      test('stroke without renderData has null render_points_blob', () async {
+        final stroke = Stroke(
+          id: 'stroke-no-render',
+          pageId: 'page-1',
+          tool: ToolType.pen,
+          color: 0xFF000000,
+          weight: 2.0,
+          opacity: 1.0,
+          points: [
+            StrokePoint(
+              x: 0.0, y: 0.0, pressure: 0.5,
+              tiltX: 0.0, tiltY: 0.0, twist: 0.0, timestamp: 0),
+          ],
+          createdAt: DateTime.utc(2024, 1, 15),
+        );
+
+        await db.insertStroke(stroke);
+        final retrieved = await db.getStroke('stroke-no-render');
+
+        expect(retrieved, isNotNull);
+        expect(retrieved!.renderData, isNull);
+      });
+    });
+
+    group('Page Snapshots', () {
+      setUp(() async {
+        await db.insertNotebook(Notebook(
+            id: 'nb-1', title: 'Test', ownerId: 'user-1'));
+        await db.insertChapter(Chapter(
+            id: 'ch-1', notebookId: 'nb-1', title: 'Test', order: 0));
+        await db.insertPage(SketchPage(
+            id: 'page-1', chapterId: 'ch-1', pageNumber: 0));
+      });
+
+      test('save and retrieve snapshot', () async {
+        final pngBlob = Uint8List.fromList([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A]);
+
+        await db.savePageSnapshot(
+          pageId: 'page-1',
+          pngBlob: pngBlob,
+          strokeVersion: 5,
+          width: 1920,
+          height: 1080,
+        );
+
+        final retrieved = await db.getPageSnapshot('page-1');
+        expect(retrieved, isNotNull);
+        expect(retrieved!.length, equals(pngBlob.length));
+        expect(retrieved[0], equals(0x89)); // PNG magic byte
+      });
+
+      test('returns null for non-existent snapshot', () async {
+        final retrieved = await db.getPageSnapshot('page-999');
+        expect(retrieved, isNull);
+      });
+
+      test('save overwrites existing snapshot', () async {
+        final blob1 = Uint8List.fromList([1, 2, 3]);
+        final blob2 = Uint8List.fromList([4, 5, 6, 7]);
+
+        await db.savePageSnapshot(
+          pageId: 'page-1',
+          pngBlob: blob1,
+          strokeVersion: 1,
+          width: 100,
+          height: 100,
+        );
+        await db.savePageSnapshot(
+          pageId: 'page-1',
+          pngBlob: blob2,
+          strokeVersion: 2,
+          width: 200,
+          height: 200,
+        );
+
+        final retrieved = await db.getPageSnapshot('page-1');
+        expect(retrieved, isNotNull);
+        expect(retrieved!.length, equals(4));
+        expect(retrieved[0], equals(4));
+      });
+
+      test('delete removes snapshot', () async {
+        final pngBlob = Uint8List.fromList([1, 2, 3]);
+
+        await db.savePageSnapshot(
+          pageId: 'page-1',
+          pngBlob: pngBlob,
+          strokeVersion: 1,
+          width: 100,
+          height: 100,
+        );
+
+        await db.deletePageSnapshot('page-1');
+        final retrieved = await db.getPageSnapshot('page-1');
+        expect(retrieved, isNull);
+      });
+
+      test('delete non-existent snapshot does not throw', () async {
+        // Should complete without error
+        await db.deletePageSnapshot('page-999');
       });
     });
   });

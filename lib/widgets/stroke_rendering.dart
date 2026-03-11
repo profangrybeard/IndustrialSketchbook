@@ -451,37 +451,35 @@ void _renderPencilStroke(
   canvas.saveLayer(stroke.boundingRect, Paint());
 
   // 2 points: simple ribbon
+  // Phase 2: tilt and velocity dropped from pencil rendering.
+  // Only pressure + grain affect visuals.
   if (points.length == 2) {
     final p0 = points[0];
     final p1 = points[1];
     final pencilP0 = pencilPressure(p0.pressure, exponent: pressureExponent);
     final pencilP1 = pencilPressure(p1.pressure, exponent: pressureExponent);
-    final tilt0 = tiltWidthMultiplier(p0.tiltX);
-    final tilt1 = tiltWidthMultiplier(p1.tiltX);
 
     double hw0, hw1;
     switch (pressureMode) {
       case PressureMode.opacity:
-        hw0 = stroke.weight * tilt0 / 2.0;
-        hw1 = stroke.weight * tilt1 / 2.0;
+        hw0 = stroke.weight / 2.0;
+        hw1 = stroke.weight / 2.0;
       case PressureMode.width:
       case PressureMode.both:
-        hw0 = stroke.weight * math.max(pencilP0, 0.1) * tilt0 / 2.0;
-        hw1 = stroke.weight * math.max(pencilP1, 0.1) * tilt1 / 2.0;
+        hw0 = stroke.weight * math.max(pencilP0, 0.1) / 2.0;
+        hw1 = stroke.weight * math.max(pencilP1, 0.1) / 2.0;
     }
 
     final avgPencilP = (pencilP0 + pencilP1) / 2.0;
-    final avgTiltFade = (tiltOpacityFade(p0.tiltX) + tiltOpacityFade(p1.tiltX)) / 2.0;
     final grain = grainFactor((p0.x + p1.x) / 2, (p0.y + p1.y) / 2, grainIntensity);
-    final velFactor = velocityFactor(p0, p1);
 
     double alpha;
     switch (pressureMode) {
       case PressureMode.width:
-        alpha = baseAlpha * 0.7 * grain * velFactor * avgTiltFade;
+        alpha = baseAlpha * 0.7 * grain;
       case PressureMode.opacity:
       case PressureMode.both:
-        alpha = baseAlpha * 0.7 * math.max(avgPencilP, 0.1) * grain * velFactor * avgTiltFade;
+        alpha = baseAlpha * 0.7 * math.max(avgPencilP, 0.1) * grain;
     }
 
     final spinePoints = <_SpinePoint>[
@@ -500,31 +498,30 @@ void _renderPencilStroke(
 
   // 3+ points: evaluate Catmull-Rom spline → spine points with half-widths
   // and per-point opacity for pencil effects.
+  // Phase 2: tilt and velocity dropped. Only pressure + grain affect visuals.
   final spinePoints = <_SpinePoint>[];
   final spineAlphas = <double>[];
 
   // Compute properties for first point
   final firstP = points[0];
   final firstPencilP = pencilPressure(firstP.pressure, exponent: pressureExponent);
-  final firstTiltMult = tiltWidthMultiplier(firstP.tiltX);
-  final firstTiltFade = tiltOpacityFade(firstP.tiltX);
   double firstHW;
   switch (pressureMode) {
     case PressureMode.opacity:
-      firstHW = stroke.weight * firstTiltMult / 2.0;
+      firstHW = stroke.weight / 2.0;
     case PressureMode.width:
     case PressureMode.both:
-      firstHW = stroke.weight * math.max(firstPencilP, 0.1) * firstTiltMult / 2.0;
+      firstHW = stroke.weight * math.max(firstPencilP, 0.1) / 2.0;
   }
   spinePoints.add(_SpinePoint(firstP.x, firstP.y, firstHW));
 
   double firstAlpha;
   switch (pressureMode) {
     case PressureMode.width:
-      firstAlpha = baseAlpha * 0.7 * firstTiltFade;
+      firstAlpha = baseAlpha * 0.7;
     case PressureMode.opacity:
     case PressureMode.both:
-      firstAlpha = baseAlpha * 0.7 * math.max(firstPencilP, 0.1) * firstTiltFade;
+      firstAlpha = baseAlpha * 0.7 * math.max(firstPencilP, 0.1);
   }
   spineAlphas.add(firstAlpha.clamp(0.01, 1.0));
 
@@ -551,34 +548,21 @@ void _renderPencilStroke(
       final y = _cubicEval(t, p1.y, cp1y, cp2y, p2.y);
 
       final pressure = p1.pressure + (p2.pressure - p1.pressure) * t;
-      final tiltX = p1.tiltX + (p2.tiltX - p1.tiltX) * t;
-      final tiltMult = tiltWidthMultiplier(tiltX);
-      final tiltFade = tiltOpacityFade(tiltX);
       final pencilP = pencilPressure(pressure, exponent: pressureExponent);
       final grain = grainFactor(x, y, grainIntensity);
-
-      // Approximate velocity from original segment endpoints
-      final dt = ((p2.timestamp - p1.timestamp).abs() / subs);
-      final prevSp = spinePoints.last;
-      final dx = x - prevSp.x;
-      final dy = y - prevSp.y;
-      final dist = math.sqrt(dx * dx + dy * dy);
-      final velocity = dt > 0 ? dist / (dt / 1000.0) : 0.0;
-      final velFactor =
-          (1.0 - ((velocity - 1.0) / 3.0).clamp(0.0, 0.4)).clamp(0.6, 1.0);
 
       double hw;
       double alpha;
       switch (pressureMode) {
         case PressureMode.width:
-          hw = stroke.weight * math.max(pencilP, 0.1) * tiltMult / 2.0;
-          alpha = baseAlpha * 0.7 * grain * velFactor * tiltFade;
+          hw = stroke.weight * math.max(pencilP, 0.1) / 2.0;
+          alpha = baseAlpha * 0.7 * grain;
         case PressureMode.opacity:
-          hw = stroke.weight * tiltMult / 2.0;
-          alpha = baseAlpha * 0.7 * math.max(pencilP, 0.1) * grain * velFactor * tiltFade;
+          hw = stroke.weight / 2.0;
+          alpha = baseAlpha * 0.7 * math.max(pencilP, 0.1) * grain;
         case PressureMode.both:
-          hw = stroke.weight * math.max(pencilP, 0.1) * tiltMult / 2.0;
-          alpha = baseAlpha * 0.7 * math.max(pencilP, 0.1) * grain * velFactor * tiltFade;
+          hw = stroke.weight * math.max(pencilP, 0.1) / 2.0;
+          alpha = baseAlpha * 0.7 * math.max(pencilP, 0.1) * grain;
       }
 
       spinePoints.add(_SpinePoint(x, y, hw));
@@ -618,8 +602,11 @@ void _renderPencilStroke(
   canvas.restore();
 }
 
-/// Apply pencil-specific paint properties (pressure, tilt, grain, velocity)
-/// for a segment between two points.
+/// Apply pencil-specific paint properties (pressure, grain) for a segment
+/// between two points.
+///
+/// Phase 2: tilt and velocity effects removed from pencil rendering.
+/// Only pressure and grain affect visuals.
 void _applyPencilPaint(
   Paint pencilPaint,
   StrokePoint p0,
@@ -634,39 +621,23 @@ void _applyPencilPaint(
   final avgRawPressure = (p0.pressure + p1.pressure) / 2.0;
   final pencilP = pencilPressure(avgRawPressure, exponent: pressureExponent);
 
-  final avgTiltX = (p0.tiltX + p1.tiltX) / 2.0;
-  final tiltMult = tiltWidthMultiplier(avgTiltX);
-  final tiltFade = tiltOpacityFade(avgTiltX);
-
   final avgX = (p0.x + p1.x) / 2.0;
   final avgY = (p0.y + p1.y) / 2.0;
   final grain = grainFactor(avgX, avgY, grainIntensity);
-
-  final velFactor = velocityFactor(p0, p1);
 
   double effectiveWidth;
   double effectiveAlpha;
 
   switch (pressureMode) {
     case PressureMode.width:
-      effectiveWidth = stroke.weight * math.max(pencilP, 0.1) * tiltMult;
-      effectiveAlpha = baseAlpha * 0.7 * grain * velFactor * tiltFade;
+      effectiveWidth = stroke.weight * math.max(pencilP, 0.1);
+      effectiveAlpha = baseAlpha * 0.7 * grain;
     case PressureMode.opacity:
-      effectiveWidth = stroke.weight * tiltMult;
-      effectiveAlpha = baseAlpha *
-          0.7 *
-          math.max(pencilP, 0.1) *
-          grain *
-          velFactor *
-          tiltFade;
+      effectiveWidth = stroke.weight;
+      effectiveAlpha = baseAlpha * 0.7 * math.max(pencilP, 0.1) * grain;
     case PressureMode.both:
-      effectiveWidth = stroke.weight * math.max(pencilP, 0.1) * tiltMult;
-      effectiveAlpha = baseAlpha *
-          0.7 *
-          math.max(pencilP, 0.1) *
-          grain *
-          velFactor *
-          tiltFade;
+      effectiveWidth = stroke.weight * math.max(pencilP, 0.1);
+      effectiveAlpha = baseAlpha * 0.7 * math.max(pencilP, 0.1) * grain;
   }
 
   pencilPaint.strokeWidth = effectiveWidth;

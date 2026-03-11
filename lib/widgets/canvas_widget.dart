@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
@@ -9,6 +11,7 @@ import 'package:uuid/uuid.dart';
 
 import '../models/chapter.dart';
 import '../models/eraser_mode.dart';
+import '../models/render_point.dart';
 import '../models/grid_config.dart';
 import '../models/grid_style.dart';
 import '../models/page_style.dart';
@@ -21,7 +24,9 @@ import '../providers/database_provider.dart';
 import '../providers/auth_provider.dart';
 import '../providers/drawing_provider.dart';
 import '../providers/notebook_provider.dart';
+import '../providers/snapshot_provider.dart';
 import '../services/drawing_service.dart';
+import '../utils/curve_fitter.dart';
 import '../utils/stroke_splitter.dart';
 import 'active_stroke_painter.dart';
 import 'background_painter.dart';
@@ -162,6 +167,19 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
   /// the stroke starts then.
   bool _belowDeadzone = false;
 
+  // ---------------------------------------------------------------------------
+  // Page snapshot state (Phase 3: instant page switching)
+  // ---------------------------------------------------------------------------
+
+  /// Decoded snapshot image displayed during page switch while strokes load.
+  ui.Image? _snapshotImage;
+
+  /// Whether the snapshot overlay is currently showing (crossfade control).
+  bool _showingSnapshot = false;
+
+  /// Debounce timer for capturing snapshots after pen-up.
+  Timer? _snapshotDebounce;
+
   @override
   void initState() {
     super.initState();
@@ -172,6 +190,8 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _snapshotDebounce?.cancel();
+    _snapshotImage?.dispose();
     _rasterCachePool.dispose();
     super.dispose();
   }
@@ -236,6 +256,18 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
             drawingService.loadStrokes(strokes);
           }
 
+          // Phase 3: dismiss snapshot overlay after strokes are loaded.
+          // Schedule after paint frame so the committed strokes painter
+          // has a chance to render before we fade out the snapshot.
+          if (_showingSnapshot && mounted) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!mounted || gen != _loadGeneration) return;
+              setState(() {
+                _showingSnapshot = false;
+              });
+            });
+          }
+
           // Load page settings (grid style, spacing, paper color)
           final page = await db.getPage(_pageId);
           if (!mounted || gen != _loadGeneration) return;
@@ -249,6 +281,12 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
         });
       });
     }
+
+    // Phase 2: feed canvas dimensions to DrawingService for coordinate
+    // normalization. The canvas fills the full Scaffold body, so
+    // MediaQuery.size gives us the logical pixel dimensions.
+    final screenSize = MediaQuery.of(context).size;
+    drawingService.setCanvasDimensions(screenSize.width, screenSize.height);
 
     return Scaffold(
       body: Stack(
@@ -276,6 +314,29 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                 ),
               ),
     
+              // Phase 3: Snapshot overlay — instant display during page switch.
+              // Crossfades out (200ms) when live strokes finish loading.
+              if (_snapshotImage != null)
+                Positioned.fill(
+                  child: AnimatedOpacity(
+                    opacity: _showingSnapshot ? 1.0 : 0.0,
+                    duration: const Duration(milliseconds: 200),
+                    onEnd: () {
+                      // Dispose snapshot image after fade-out completes
+                      if (!_showingSnapshot && _snapshotImage != null) {
+                        setState(() {
+                          _snapshotImage!.dispose();
+                          _snapshotImage = null;
+                        });
+                      }
+                    },
+                    child: CustomPaint(
+                      painter: _SnapshotPainter(_snapshotImage!),
+                      size: Size.infinite,
+                    ),
+                  ),
+                ),
+
               // Layer 2: Committed strokes — cached by RepaintBoundary
               Positioned.fill(
                 child: RepaintBoundary(
@@ -667,6 +728,13 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
         UndoAction(strokesAdded: [committed]),
       );
       _persistStroke(committed);
+
+      // Phase 3: debounced snapshot capture — waits 500ms after last
+      // pen-up before capturing, to avoid encoding during rapid drawing.
+      _snapshotDebounce?.cancel();
+      _snapshotDebounce = Timer(const Duration(milliseconds: 500), () {
+        _capturePageSnapshot(drawingService);
+      });
     }
   }
 
@@ -811,6 +879,13 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
       newlyErasedIds.add(stroke.id);
 
       for (final segment in segments) {
+        // Phase 2: re-fit split segments into normalized RenderPoints.
+        final cw = drawingService.canvasWidth;
+        final ch = drawingService.canvasHeight;
+        final hasCanvasDims = cw > 0 && ch > 0;
+        final fitted = CurveFitter.chaikinSmooth(
+          CurveFitter.simplify(segment),
+        );
         strokesToAdd.add(Stroke(
           id: _uuid.v4(),
           pageId: _pageId,
@@ -820,6 +895,13 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
           weight: stroke.weight,
           opacity: stroke.opacity,
           points: segment,
+          renderData: fitted
+              .map((sp) => hasCanvasDims
+                  ? RenderPoint.fromStrokePoint(sp,
+                      canvasWidth: cw, canvasHeight: ch)
+                  : RenderPoint(
+                      x: sp.x, y: sp.y, pressure: sp.pressure))
+              .toList(),
           createdAt: DateTime.now().toUtc(),
         ));
       }
@@ -1016,6 +1098,19 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
   void _switchToPage(String newPageId, DrawingService drawingService) {
     if (newPageId == _pageId) return;
     _loadGeneration++; // Cancel any in-flight stroke loads
+    _snapshotDebounce?.cancel();
+
+    // Phase 3: capture snapshot of current page before leaving.
+    // Uses the raster cache image (already in GPU memory).
+    final currentCache = _rasterCachePool.peek(_pageId);
+    if (currentCache != null && currentCache.image != null) {
+      final snapshotService = ref.read(snapshotServiceProvider);
+      snapshotService?.captureSnapshot(
+        pageId: _pageId,
+        image: currentCache.image!,
+        strokeVersion: drawingService.strokeVersion,
+      );
+    }
 
     // Persist current page + tool settings before leaving
     _persistPageSettings();
@@ -1032,6 +1127,27 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
 
     // Persist last-viewed page for next app launch
     _saveLastViewedPage(newPageId, ref.read(currentChapterIdProvider));
+
+    // Phase 3: try to load snapshot for the new page.
+    // Display it immediately while strokes load in the background.
+    _snapshotImage?.dispose();
+    _snapshotImage = null;
+    _showingSnapshot = false;
+    final snapshotService = ref.read(snapshotServiceProvider);
+    if (snapshotService != null) {
+      snapshotService.getSnapshot(newPageId).then((image) {
+        if (!mounted) {
+          image?.dispose();
+          return;
+        }
+        if (image != null) {
+          setState(() {
+            _snapshotImage = image;
+            _showingSnapshot = true;
+          });
+        }
+      });
+    }
 
     // Reset load flag so the next build loads the new page's data
     setState(() {
@@ -1287,6 +1403,23 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     }
   }
 
+  /// Phase 3: capture the current page's raster cache as a snapshot.
+  ///
+  /// Called on a debounced timer after pen-up. The snapshot is stored in
+  /// the SnapshotService's LRU cache and persisted to SQLite for recovery
+  /// after app restart.
+  void _capturePageSnapshot(DrawingService drawingService) {
+    final cache = _rasterCachePool.peek(_pageId);
+    if (cache == null || cache.image == null) return;
+
+    final snapshotService = ref.read(snapshotServiceProvider);
+    snapshotService?.captureSnapshot(
+      pageId: _pageId,
+      image: cache.image!,
+      strokeVersion: drawingService.strokeVersion,
+    );
+  }
+
   /// Persist current page settings (grid style, spacing, paper color) to SQLite.
   ///
   /// Fire-and-forget — called when the user changes any visual setting
@@ -1314,3 +1447,30 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
 
 /// Re-export the old name for backward compatibility with main.dart.
 typedef CanvasPlaceholder = CanvasWidget;
+
+/// Simple painter that draws a decoded snapshot [ui.Image] to fill the canvas.
+///
+/// Used as the instant-display layer during page switches. The snapshot
+/// provides immediate visual feedback while the full stroke rebuild
+/// loads in the background.
+class _SnapshotPainter extends CustomPainter {
+  _SnapshotPainter(this.image);
+
+  final ui.Image image;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawImageRect(
+      image,
+      Rect.fromLTWH(
+          0, 0, image.width.toDouble(), image.height.toDouble()),
+      Rect.fromLTWH(0, 0, size.width, size.height),
+      Paint(),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _SnapshotPainter oldDelegate) {
+    return image != oldDelegate.image;
+  }
+}
