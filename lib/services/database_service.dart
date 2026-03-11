@@ -42,7 +42,7 @@ class DatabaseService {
 
     _db = await openDatabase(
       dbPath,
-      version: 2,
+      version: 3,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
       onConfigure: (db) async {
@@ -61,6 +61,15 @@ class DatabaseService {
       // v2: Add paper_color column to pages table (Layer 2 — page settings)
       await db.execute(
         'ALTER TABLE pages ADD COLUMN paper_color INTEGER NOT NULL DEFAULT ${0xFFF5F5F0}',
+      );
+    }
+    if (oldVersion < 3) {
+      // v3: Level 1 curve fitting + archive flag
+      await db.execute(
+        'ALTER TABLE strokes ADD COLUMN fitted_points_blob BLOB',
+      );
+      await db.execute(
+        'ALTER TABLE chapters ADD COLUMN archive_raw_data INTEGER NOT NULL DEFAULT 0',
       );
     }
   }
@@ -86,6 +95,7 @@ class DatabaseService {
         title TEXT NOT NULL,
         sort_order INTEGER NOT NULL,
         color INTEGER NOT NULL DEFAULT 4284513675,
+        archive_raw_data INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY (notebook_id) REFERENCES notebooks(id)
       )
     ''');
@@ -119,6 +129,7 @@ class DatabaseService {
         weight REAL NOT NULL,
         opacity REAL NOT NULL,
         points_blob BLOB NOT NULL,
+        fitted_points_blob BLOB,
         created_at TEXT NOT NULL,
         is_tombstone INTEGER NOT NULL DEFAULT 0,
         erases_stroke_id TEXT,

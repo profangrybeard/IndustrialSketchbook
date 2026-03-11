@@ -154,5 +154,54 @@ void main() {
 
       expect(cache.canIncrement(6, size, 99), isFalse);
     });
+
+    // canDirtyRebuild tests
+    test('canDirtyRebuild returns true when version gap is 1', () {
+      final image = _makeTestImage(800, 600);
+      cache.update(image, 5, size, paramHash);
+
+      expect(cache.canDirtyRebuild(6, size, paramHash), isTrue);
+    });
+
+    test('canDirtyRebuild returns true when version gap is 2', () {
+      final image = _makeTestImage(800, 600);
+      cache.update(image, 5, size, paramHash);
+
+      expect(cache.canDirtyRebuild(7, size, paramHash), isTrue);
+    });
+
+    test('canDirtyRebuild returns false when version gap is 3+', () {
+      final image = _makeTestImage(800, 600);
+      cache.update(image, 5, size, paramHash);
+
+      expect(cache.canDirtyRebuild(8, size, paramHash), isFalse);
+      expect(cache.canDirtyRebuild(10, size, paramHash), isFalse);
+    });
+
+    test('canDirtyRebuild returns false on fresh cache', () {
+      expect(cache.canDirtyRebuild(1, size, paramHash), isFalse);
+    });
+
+    test('canDirtyRebuild returns false for size mismatch', () {
+      final image = _makeTestImage(800, 600);
+      cache.update(image, 5, size, paramHash);
+
+      const differentSize = ui.Size(1024, 768);
+      expect(cache.canDirtyRebuild(6, differentSize, paramHash), isFalse);
+    });
+
+    test('canDirtyRebuild returns false for paramHash mismatch', () {
+      final image = _makeTestImage(800, 600);
+      cache.update(image, 5, size, paramHash);
+
+      expect(cache.canDirtyRebuild(6, size, 99), isFalse);
+    });
+
+    test('canDirtyRebuild returns false when version matches (not behind)', () {
+      final image = _makeTestImage(800, 600);
+      cache.update(image, 5, size, paramHash);
+
+      expect(cache.canDirtyRebuild(5, size, paramHash), isFalse);
+    });
   });
 }

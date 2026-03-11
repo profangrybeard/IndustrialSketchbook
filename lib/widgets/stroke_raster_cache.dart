@@ -42,6 +42,18 @@ class StrokeRasterCache extends ChangeNotifier {
       _size == size &&
       _paramHash == paramHash;
 
+  /// Whether the cache can serve as base for a dirty-region rebuild.
+  ///
+  /// Less strict than [canIncrement]: allows a version gap of up to 2
+  /// because undo/redo operations bump the version twice per logical operation
+  /// (once for remove, once for add).
+  bool canDirtyRebuild(int version, ui.Size size, int paramHash) =>
+      _image != null &&
+      _version >= version - 2 &&
+      _version < version &&
+      _size == size &&
+      _paramHash == paramHash;
+
   /// Replace the cached image. Disposes the old image if present.
   void update(ui.Image newImage, int version, ui.Size size, int paramHash) {
     _image?.dispose();

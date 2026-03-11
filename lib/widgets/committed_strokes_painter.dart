@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../models/pressure_mode.dart';
 import '../models/stroke.dart';
+import '../services/drawing_service.dart' show MutationInfo, MutationType;
 import 'stroke_raster_cache.dart';
 import '../utils/perf_metrics.dart';
 import 'stroke_rendering.dart' as rendering;
@@ -30,8 +31,7 @@ class CommittedStrokesPainter extends CustomPainter {
     required this.pressureExponent,
     required this.rasterCache,
     required this.devicePixelRatio,
-    required this.lastMutationWasAppend,
-    this.lastAppendedStroke,
+    required this.lastMutationInfo,
   }) : super(repaint: rasterCache);
 
   /// All committed strokes for the current page.
@@ -58,11 +58,8 @@ class CommittedStrokesPainter extends CustomPainter {
   /// Device pixel ratio for high-DPI rasterization.
   final double devicePixelRatio;
 
-  /// Whether the last version bump was a simple pen-up append.
-  final bool lastMutationWasAppend;
-
-  /// The stroke appended in the last pen-up (if [lastMutationWasAppend]).
-  final Stroke? lastAppendedStroke;
+  /// Describes the most recent mutation for cache update path selection.
+  final MutationInfo lastMutationInfo;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -82,9 +79,9 @@ class CommittedStrokesPainter extends CustomPainter {
 
     // 2. Incremental update — cache is exactly 1 version behind and the
     //    last mutation was a simple pen-up append. Draw old image + new stroke.
-    if (rasterCache.canIncrement(strokeVersion, size, paramHash) &&
-        lastMutationWasAppend &&
-        lastAppendedStroke != null) {
+    if (lastMutationInfo.type == MutationType.append &&
+        lastMutationInfo.appendedStroke != null &&
+        rasterCache.canIncrement(strokeVersion, size, paramHash)) {
       _incrementCache(canvas, size, paramHash);
       sw.stop();
       perf.committedPaintUs = sw.elapsedMicroseconds;
@@ -95,7 +92,16 @@ class CommittedStrokesPainter extends CustomPainter {
       return;
     }
 
-    // 3. Full rebuild — undo, erase, clear, load, or first render.
+    // 3. Dirty-region update — clear and re-render only the affected area.
+    if (lastMutationInfo.type == MutationType.dirtyRegion &&
+        lastMutationInfo.dirtyRect != null &&
+        !lastMutationInfo.dirtyRect!.isEmpty &&
+        rasterCache.canDirtyRebuild(strokeVersion, size, paramHash)) {
+      _dirtyRegionRebuild(canvas, size, paramHash);
+      return;
+    }
+
+    // 4. Full rebuild — clear, load, or first render.
     _fullRebuildCache(canvas, size, paramHash);
     sw.stop();
     perf.committedPaintUs = sw.elapsedMicroseconds;
@@ -141,7 +147,7 @@ class CommittedStrokesPainter extends CustomPainter {
     );
 
     // Render only the newly appended stroke
-    final stroke = lastAppendedStroke!;
+    final stroke = lastMutationInfo.appendedStroke!;
     if (!stroke.isTombstone) {
       rendering.renderStroke(
         recCanvas,
@@ -152,6 +158,62 @@ class CommittedStrokesPainter extends CustomPainter {
         targetArcLength: rendering.replayTargetArcLength,
       );
     }
+
+    final picture = recorder.endRecording();
+    final newImage = picture.toImageSync(
+        (size.width * dpr).ceil(), (size.height * dpr).ceil());
+    picture.dispose();
+    rasterCache.update(newImage, strokeVersion, size, paramHash);
+
+    _drawCachedImage(canvas, size);
+  }
+
+  /// Dirty-region cache update: clear and re-render only the affected area.
+  ///
+  /// Used for undo/redo/erase where only a localized area changes.
+  /// Cost: O(K) where K = strokes overlapping the dirty rect, vs O(N) for
+  /// full rebuild.
+  void _dirtyRegionRebuild(Canvas canvas, Size size, int paramHash) {
+    final dpr = devicePixelRatio;
+    final dirtyRect = lastMutationInfo.dirtyRect!;
+    final recorder = ui.PictureRecorder();
+    final recCanvas = Canvas(recorder);
+    recCanvas.scale(dpr, dpr);
+
+    // Draw existing cached image as base
+    final oldImage = rasterCache.image!;
+    recCanvas.drawImageRect(
+      oldImage,
+      Rect.fromLTWH(
+          0, 0, oldImage.width.toDouble(), oldImage.height.toDouble()),
+      Rect.fromLTWH(0, 0, size.width, size.height),
+      Paint(),
+    );
+
+    // Clear the dirty rect to transparent
+    recCanvas.drawRect(
+      dirtyRect,
+      Paint()..blendMode = BlendMode.clear,
+    );
+
+    // Clip to dirty rect and re-render only overlapping strokes.
+    // Clipping prevents alpha doubling for semi-transparent strokes
+    // that cross the dirty region boundary.
+    recCanvas.save();
+    recCanvas.clipRect(dirtyRect);
+    for (final stroke in committedStrokes) {
+      if (stroke.isTombstone) continue;
+      if (erasedStrokeIds.contains(stroke.id)) continue;
+      if (!stroke.boundingRect.overlaps(dirtyRect)) continue;
+      rendering.renderStroke(
+        recCanvas,
+        stroke,
+        pressureMode: pressureMode,
+        grainIntensity: grainIntensity,
+        pressureExponent: pressureExponent,
+      );
+    }
+    recCanvas.restore();
 
     final picture = recorder.endRecording();
     final newImage = picture.toImageSync(

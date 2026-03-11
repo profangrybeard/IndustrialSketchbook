@@ -30,6 +30,7 @@ import 'developer_overlay.dart';
 import 'floating_palette.dart';
 import 'organize_panel.dart';
 import 'page_strip.dart';
+import 'raster_cache_pool.dart';
 import 'stroke_raster_cache.dart';
 import 'sync_settings_page.dart';
 
@@ -52,9 +53,14 @@ class CanvasWidget extends ConsumerStatefulWidget {
   ConsumerState<CanvasWidget> createState() => _CanvasWidgetState();
 }
 
-class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
-  /// Raster cache for committed strokes. Survives widget rebuilds.
-  final _strokeRasterCache = StrokeRasterCache();
+class _CanvasWidgetState extends ConsumerState<CanvasWidget>
+    with WidgetsBindingObserver {
+  /// LRU pool of raster caches for recently visited pages.
+  final _rasterCachePool = RasterCachePool(maxEntries: 3);
+
+  /// Active page's raster cache (from the pool).
+  StrokeRasterCache get _strokeRasterCache =>
+      _rasterCachePool.getOrCreate(_pageId);
 
   /// Whether a stylus/pen is currently active (for palm rejection).
   bool _penActive = false;
@@ -159,21 +165,33 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _restoreLastViewedPage();
   }
 
   @override
   void dispose() {
-    _strokeRasterCache.dispose();
+    WidgetsBinding.instance.removeObserver(this);
+    _rasterCachePool.dispose();
     super.dispose();
   }
 
-  /// Restore the last-viewed page from SharedPreferences on app launch.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      ref.read(drawingServiceProvider).saveToolState();
+    }
+  }
+
+  /// Restore the last-viewed page and tool state from SharedPreferences.
   Future<void> _restoreLastViewedPage() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final savedPageId = prefs.getString('lastPageId');
       final savedChapterId = prefs.getString('lastChapterId');
+
+      // Restore tool settings before first render
+      await ref.read(drawingServiceProvider).restoreToolState();
 
       if (mounted) {
         if (savedPageId != null) {
@@ -211,7 +229,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
         Future.microtask(() async {
           if (!mounted || gen != _loadGeneration) return;
 
-          // Load strokes
+          // Load strokes for the current page
           final strokes = await db.getStrokesByPageId(_pageId);
           if (!mounted || gen != _loadGeneration) return;
           if (strokes.isNotEmpty) {
@@ -274,10 +292,8 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
                       rasterCache: _strokeRasterCache,
                       devicePixelRatio:
                           MediaQuery.of(context).devicePixelRatio,
-                      lastMutationWasAppend:
-                          drawingService.lastMutationWasAppend,
-                      lastAppendedStroke:
-                          drawingService.lastAppendedStroke,
+                      lastMutationInfo:
+                          drawingService.lastMutationInfo,
                     ),
                     size: Size.infinite,
                   ),
@@ -700,6 +716,49 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   }
 
   // ---------------------------------------------------------------------------
+  // Dirty rect helpers (dirty-region cache optimization)
+  // ---------------------------------------------------------------------------
+
+  /// Union two rects, treating [Rect.zero] as empty (identity element).
+  static Rect _unionRect(Rect a, Rect b) {
+    if (a == Rect.zero) return b;
+    if (b == Rect.zero) return a;
+    return a.expandToInclude(b);
+  }
+
+  /// Compute dirty rect for an undo/redo action.
+  ///
+  /// Includes bounding rects of strokes being removed AND strokes being
+  /// restored. For tombstones, includes the bounding rect of the original
+  /// stroke they erased (found via [erasesStrokeId] in committed strokes).
+  Rect _dirtyRectForAction(
+      UndoAction action, DrawingService drawingService) {
+    Rect dirty = Rect.zero;
+
+    for (final s in action.strokesAdded) {
+      if (s.isTombstone && s.erasesStrokeId != null) {
+        // Include the original stroke's rect (it will appear/disappear)
+        for (final cs in drawingService.committedStrokes) {
+          if (cs.id == s.erasesStrokeId) {
+            dirty = _unionRect(dirty, cs.boundingRect);
+            break;
+          }
+        }
+      } else if (!s.isTombstone && s.points.isNotEmpty) {
+        dirty = _unionRect(dirty, s.boundingRect);
+      }
+    }
+
+    for (final s in action.strokesRemoved) {
+      if (!s.isTombstone && s.points.isNotEmpty) {
+        dirty = _unionRect(dirty, s.boundingRect);
+      }
+    }
+
+    return dirty;
+  }
+
+  // ---------------------------------------------------------------------------
   // Standard erasing (stroke subdivision) — Phase 2.5
   // ---------------------------------------------------------------------------
 
@@ -767,8 +826,23 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
     }
 
     if (strokesToAdd.isNotEmpty) {
-      // Incremental update — avoids O(N) _recomputeErasedIds scan
-      drawingService.addCommittedStrokesForErase(strokesToAdd, newlyErasedIds);
+      // Compute dirty rect from erased originals' bounding rects
+      Rect dirtyRect = Rect.zero;
+      for (final s in strokesToAdd) {
+        if (s.isTombstone && s.erasesStrokeId != null) {
+          for (final cs in drawingService.committedStrokes) {
+            if (cs.id == s.erasesStrokeId) {
+              dirtyRect = _unionRect(dirtyRect, cs.boundingRect);
+              break;
+            }
+          }
+        }
+      }
+
+      drawingService.addCommittedStrokes(strokesToAdd);
+      if (dirtyRect != Rect.zero) {
+        drawingService.setMutationInfo(MutationInfo.dirtyRegion(dirtyRect));
+      }
       drawingService.notifyListeners();
 
       drawingService.pushUndoAction(
@@ -820,8 +894,9 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       createdAt: DateTime.now().toUtc(),
     );
 
-    // Incremental update — avoids O(N) _recomputeErasedIds scan
-    drawingService.addCommittedStrokesForErase([tombstone], {newest.id});
+    drawingService.addCommittedStrokes([tombstone]);
+    drawingService.setMutationInfo(
+        MutationInfo.dirtyRegion(newest.boundingRect));
     drawingService.notifyListeners();
 
     drawingService.pushUndoAction(
@@ -839,6 +914,9 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
     final action = drawingService.popUndo();
     if (action == null) return;
 
+    // Compute dirty rect BEFORE mutations (need access to original strokes)
+    final dirtyRect = _dirtyRectForAction(action, drawingService);
+
     if (action.strokesAdded.isNotEmpty) {
       final addedIds = action.strokesAdded.map((s) => s.id).toSet();
       drawingService.removeCommittedStrokesWhere(
@@ -851,6 +929,11 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       _persistStrokes(action.strokesRemoved);
     }
 
+    // Override with dirty-region mutation info
+    if (dirtyRect != Rect.zero) {
+      drawingService.setMutationInfo(MutationInfo.dirtyRegion(dirtyRect));
+    }
+
     _resetStitchState();
     drawingService.notifyListeners();
   }
@@ -858,6 +941,9 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
   void _handleRedo(DrawingService drawingService) {
     final action = drawingService.popRedo();
     if (action == null) return;
+
+    // Compute dirty rect BEFORE mutations
+    final dirtyRect = _dirtyRectForAction(action, drawingService);
 
     if (action.strokesAdded.isNotEmpty) {
       drawingService.addCommittedStrokes(action.strokesAdded);
@@ -869,6 +955,11 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
       drawingService.removeCommittedStrokesWhere(
           (s) => removedIds.contains(s.id));
       _deleteStrokes(removedIds.toList());
+    }
+
+    // Override with dirty-region mutation info
+    if (dirtyRect != Rect.zero) {
+      drawingService.setMutationInfo(MutationInfo.dirtyRegion(dirtyRect));
     }
 
     _resetStitchState();
@@ -926,10 +1017,11 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget> {
     if (newPageId == _pageId) return;
     _loadGeneration++; // Cancel any in-flight stroke loads
 
-    // Persist current page settings before leaving
+    // Persist current page + tool settings before leaving
     _persistPageSettings();
+    drawingService.saveToolState();
 
-    // Clear drawing state and raster cache
+    // Clear drawing state and invalidate raster cache
     drawingService.clear();
     drawingService.clearUndoHistory();
     _resetStitchState();

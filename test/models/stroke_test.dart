@@ -175,6 +175,122 @@ void main() {
     });
 
     // -----------------------------------------------------------------------
+    // FittedPoints serialization
+    // -----------------------------------------------------------------------
+    group('fittedPoints serialization', () {
+      test('JSON round-trip with fittedPoints', () {
+        final rawPoints = [
+          makePoint(0, 0, timestamp: 0),
+          makePoint(10, 5, timestamp: 1000),
+          makePoint(20, 0, timestamp: 2000),
+          makePoint(30, 5, timestamp: 3000),
+          makePoint(40, 0, timestamp: 4000),
+        ];
+        final fitted = [rawPoints.first, rawPoints.last];
+
+        final original = Stroke(
+          id: 'fitted-test',
+          pageId: 'page-1',
+          tool: ToolType.pen,
+          color: 0xFF000000,
+          weight: 2.0,
+          opacity: 1.0,
+          points: rawPoints,
+          fittedPoints: fitted,
+          createdAt: DateTime.utc(2024, 1, 15),
+        );
+
+        final json = original.toJson();
+        expect(json.containsKey('fittedPoints'), isTrue);
+
+        final restored = Stroke.fromJson(json);
+        expect(restored.fittedPoints, isNotNull);
+        expect(restored.fittedPoints!.length, equals(2));
+        expect(restored.points.length, equals(5));
+        expect(restored.renderPoints.length, equals(2));
+      });
+
+      test('JSON round-trip without fittedPoints (null)', () {
+        final original = makeStroke();
+        final json = original.toJson();
+        expect(json.containsKey('fittedPoints'), isFalse);
+
+        final restored = Stroke.fromJson(json);
+        expect(restored.fittedPoints, isNull);
+        // renderPoints falls back to raw points
+        expect(restored.renderPoints.length, equals(restored.points.length));
+      });
+
+      test('renderPoints returns fittedPoints when available', () {
+        final rawPoints = [
+          makePoint(0, 0),
+          makePoint(10, 10),
+          makePoint(20, 20),
+        ];
+        final fitted = [rawPoints.first, rawPoints.last];
+
+        final stroke = Stroke(
+          id: 's1',
+          pageId: 'page-1',
+          tool: ToolType.pen,
+          color: 0xFF000000,
+          weight: 2.0,
+          opacity: 1.0,
+          points: rawPoints,
+          fittedPoints: fitted,
+          createdAt: DateTime.utc(2024, 1, 1),
+        );
+
+        expect(stroke.renderPoints, same(fitted));
+        expect(stroke.renderPoints.length, equals(2));
+      });
+
+      test('renderPoints falls back to points when fittedPoints is null', () {
+        final stroke = makeStroke();
+        expect(stroke.fittedPoints, isNull);
+        expect(stroke.renderPoints, same(stroke.points));
+      });
+
+      test('DB map round-trip with fittedPoints', () {
+        final rawPoints = [
+          makePoint(0, 0, timestamp: 0),
+          makePoint(50, 50, timestamp: 1000),
+          makePoint(100, 0, timestamp: 2000),
+        ];
+        final fitted = [rawPoints.first, rawPoints.last];
+
+        final original = Stroke(
+          id: 'db-fitted',
+          pageId: 'page-1',
+          tool: ToolType.pencil,
+          color: 0xFF333333,
+          weight: 3.0,
+          opacity: 0.8,
+          points: rawPoints,
+          fittedPoints: fitted,
+          createdAt: DateTime.utc(2024, 6, 1),
+        );
+
+        final dbMap = original.toDbMap();
+        expect(dbMap['fitted_points_blob'], isNotNull);
+
+        final restored = Stroke.fromDbMap(dbMap);
+        expect(restored.fittedPoints, isNotNull);
+        expect(restored.fittedPoints!.length, equals(2));
+        expect(restored.points.length, equals(3));
+      });
+
+      test('DB map round-trip without fittedPoints', () {
+        final original = makeStroke();
+        final dbMap = original.toDbMap();
+        expect(dbMap['fitted_points_blob'], isNull);
+
+        final restored = Stroke.fromDbMap(dbMap);
+        expect(restored.fittedPoints, isNull);
+      });
+    });
+
+    // -----------------------------------------------------------------------
     // DRW-008: Single-point tap creates valid stroke
     //
     // Stroke.points.length == 1; no crash.
