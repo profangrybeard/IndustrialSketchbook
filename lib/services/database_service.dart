@@ -544,22 +544,31 @@ class DatabaseService {
   /// Used by partial erasing to persist the tombstone + new segments
   /// atomically.
   Future<void> insertStrokes(List<Stroke> strokes) async {
+    if (strokes.isEmpty) return;
     await db.transaction((txn) async {
+      // Query MAX(sort_order) once per page instead of once per stroke (N+1 fix).
+      final Map<String, int> nextOrder = {};
+
       for (final stroke in strokes) {
         await txn.insert('strokes', stroke.toDbMap(),
             conflictAlgorithm: ConflictAlgorithm.ignore);
 
-        final maxOrder = Sqflite.firstIntValue(await txn.rawQuery(
-              'SELECT MAX(sort_order) FROM page_stroke_order WHERE page_id = ?',
-              [stroke.pageId],
-            )) ??
-            -1;
+        if (!nextOrder.containsKey(stroke.pageId)) {
+          final maxOrder = Sqflite.firstIntValue(await txn.rawQuery(
+                'SELECT MAX(sort_order) FROM page_stroke_order WHERE page_id = ?',
+                [stroke.pageId],
+              )) ??
+              -1;
+          nextOrder[stroke.pageId] = maxOrder + 1;
+        }
 
+        final order = nextOrder[stroke.pageId]!;
         await txn.insert('page_stroke_order', {
           'page_id': stroke.pageId,
           'stroke_id': stroke.id,
-          'sort_order': maxOrder + 1,
+          'sort_order': order,
         });
+        nextOrder[stroke.pageId] = order + 1;
       }
     });
   }
