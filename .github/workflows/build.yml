@@ -5,10 +5,15 @@ on:
     branches: ['**']
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -27,6 +32,19 @@ jobs:
           mkdir -p ~/.android
           echo "${{ secrets.DEBUG_KEYSTORE }}" | base64 -d > ~/.android/debug.keystore
 
+      - name: Inject build info
+        run: |
+          REV=$(git rev-parse --short HEAD)
+          DATE=$(date -u '+%Y-%m-%d %H:%M')
+          cat > lib/config/build_info.dart << EOF
+          /// Auto-generated build info. Updated before each release build.
+          ///
+          /// To regenerate, run the build process through Claude — the git hash and
+          /// timestamp are injected automatically before \`flutter build apk\`.
+          const String buildRevision = '$REV';
+          const String buildDate = '$DATE';
+          EOF
+
       - name: Get dependencies
         run: flutter pub get
 
@@ -36,9 +54,21 @@ jobs:
       - name: Build debug APK
         run: flutter build apk --debug
 
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
+          name: app-debug-${{ github.sha }}
           path: build/app/outputs/flutter-apk/app-debug.apk
           retention-days: 14
+
+      - name: Update latest-debug release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-debug
+          name: Latest Debug APK
+          body: |
+            Debug APK built from `${{ github.ref_name }}` at `${{ github.sha }}`.
+            Download `app-debug.apk` below and install on your phone.
+          prerelease: true
+          make_latest: false
+          files: build/app/outputs/flutter-apk/app-debug.apk
