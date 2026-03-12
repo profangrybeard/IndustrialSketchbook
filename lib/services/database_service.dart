@@ -827,4 +827,24 @@ class DatabaseService {
       whereArgs: [pageId],
     );
   }
+
+  /// Purge ALL data from the database — nuclear option for dev/schema resets.
+  ///
+  /// Drops all rows from every table in dependency order, then re-creates
+  /// a fresh default notebook/chapter/page so the app doesn't crash on reload.
+  Future<void> purgeAllData() async {
+    await db.transaction((txn) async {
+      // Delete in dependency order (children first)
+      await txn.delete('page_snapshots');
+      await txn.delete('sync_queue');
+      await txn.delete('ocr_snapshots');
+      await txn.delete('image_pins');
+      await txn.delete('gallery_images');
+      await txn.delete('page_stroke_order');
+      await txn.delete('strokes');
+      await txn.delete('pages');
+      await txn.delete('chapters');
+      await txn.delete('notebooks');
+    });
+  }
 }

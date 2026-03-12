@@ -37,6 +37,7 @@ import 'organize_panel.dart';
 import 'page_strip.dart';
 import 'raster_cache_pool.dart';
 import 'stroke_raster_cache.dart';
+import 'dev_menu_page.dart';
 import 'sync_settings_page.dart';
 
 const _uuid = Uuid();
@@ -84,6 +85,9 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
 
   /// Whether the organize panel (Layer 4c) is currently visible.
   bool _showOrganizePanel = false;
+
+  /// Whether the developer info overlay is visible.
+  bool _devOverlayVisible = true;
 
   /// Generation counter — cancels stale stroke-loading microtasks on page switch.
   int _loadGeneration = 0;
@@ -464,6 +468,33 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
             onRedo: () => _handleRedo(drawingService),
             onClear: () => _handleClear(drawingService),
             isSignedIn: ref.watch(isSignedInProvider),
+            onDevTap: () async {
+              final result = await Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => DevMenuPage(
+                    devOverlayVisible: _devOverlayVisible,
+                    onDevOverlayToggled: (v) =>
+                        setState(() => _devOverlayVisible = v),
+                  ),
+                ),
+              );
+              if (!mounted) return;
+              if (result == 'purged') {
+                // Reset to default page after purge
+                ref.read(currentPageIdProvider.notifier).state = defaultPageId;
+                ref.invalidate(chaptersProvider);
+                ref.invalidate(globalPageListProvider);
+                ref.invalidate(pagesForChapterProvider);
+                // Reload strokes (now empty)
+                final ds = ref.read(drawingServiceProvider);
+                ds.loadStrokes([]);
+                _strokeRasterCache.invalidate();
+                setState(() {
+                  _strokesLoaded = false;
+                  _pageReady = false;
+                });
+              }
+            },
             onSyncTap: () async {
               await Navigator.of(context).push(
                 MaterialPageRoute(builder: (_) => const SyncSettingsPage()),
@@ -504,7 +535,9 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
             return globalPagesAsync.when(
               data: (globalPages) {
                 if (globalPages.isEmpty) {
-                  return DeveloperOverlay(drawingService: drawingService);
+                  return _devOverlayVisible
+                      ? DeveloperOverlay(drawingService: drawingService)
+                      : const SizedBox.shrink();
                 }
 
                 final currentGlobalIndex = globalPages
@@ -530,13 +563,14 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                 return Stack(
                   children: [
                     // Developer overlay (Phase 2.8.1)
-                    DeveloperOverlay(
-                      drawingService: drawingService,
-                      currentPageIndex: safeIndex,
-                      totalPages: globalPages.length,
-                      chapterIndex: currentEntry.chapterIndex,
-                      totalChapters: currentEntry.totalChapters,
-                    ),
+                    if (_devOverlayVisible)
+                      DeveloperOverlay(
+                        drawingService: drawingService,
+                        currentPageIndex: safeIndex,
+                        totalPages: globalPages.length,
+                        chapterIndex: currentEntry.chapterIndex,
+                        totalChapters: currentEntry.totalChapters,
+                      ),
                     // Page navigation strip (Layer 4b)
                     PageStrip(
                       currentPage: safeIndex,
@@ -565,10 +599,12 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                   ],
                 );
               },
-              loading: () =>
-                  DeveloperOverlay(drawingService: drawingService),
-              error: (_, __) =>
-                  DeveloperOverlay(drawingService: drawingService),
+              loading: () => _devOverlayVisible
+                  ? DeveloperOverlay(drawingService: drawingService)
+                  : const SizedBox.shrink(),
+              error: (_, __) => _devOverlayVisible
+                  ? DeveloperOverlay(drawingService: drawingService)
+                  : const SizedBox.shrink(),
             );
           }),
 
