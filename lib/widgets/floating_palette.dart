@@ -43,6 +43,7 @@ class FloatingPalette extends StatefulWidget {
     required this.onClear,
     this.isSignedIn = false,
     this.onSyncTap,
+    this.onDevTap,
   });
 
   final ToolType currentTool;
@@ -74,6 +75,7 @@ class FloatingPalette extends StatefulWidget {
   final VoidCallback onClear;
   final bool isSignedIn;
   final VoidCallback? onSyncTap;
+  final VoidCallback? onDevTap;
 
   @override
   State<FloatingPalette> createState() => _FloatingPaletteState();
@@ -269,6 +271,14 @@ class _FloatingPaletteState extends State<FloatingPalette> {
             isActive: widget.isSignedIn,
             activeColor: const Color(0xFF4285F4),
             onTap: widget.onSyncTap ?? () {},
+          ),
+          const _PaletteDivider(),
+
+          // Dev menu
+          _PaletteIcon(
+            icon: Icons.bug_report_outlined,
+            tooltip: 'Dev Menu',
+            onTap: widget.onDevTap ?? () {},
           ),
         ],
       ),

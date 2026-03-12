@@ -165,22 +165,6 @@ class SyncSettingsPage extends ConsumerWidget {
             ),
           ),
         ),
-        const SizedBox(height: 12),
-        SizedBox(
-          width: double.infinity,
-          child: OutlinedButton.icon(
-            onPressed: isBusy ? null : () => ref.read(syncEngineProvider).forcePush(),
-            icon: const Icon(Icons.cloud_upload_outlined, size: 20),
-            label: const Text('Force Push (overwrite cloud)'),
-            style: OutlinedButton.styleFrom(
-              foregroundColor: Colors.orange,
-              side: const BorderSide(color: Colors.orange, width: 1),
-              disabledForegroundColor: Colors.white24,
-              padding: const EdgeInsets.symmetric(vertical: 14),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-            ),
-          ),
-        ),
       ]),
     );
   }
