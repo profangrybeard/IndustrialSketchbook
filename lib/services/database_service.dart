@@ -44,6 +44,7 @@ class DatabaseService {
       dbPath,
       version: 4,
       onCreate: _onCreate,
+      onUpgrade: _onUpgrade,
       onConfigure: (db) async {
         // Enable WAL mode for better concurrent read/write performance
         // Use rawQuery because journal_mode returns a result set
@@ -220,6 +221,37 @@ class DatabaseService {
     } on DatabaseException catch (e) {
       // FTS5 not available on this device — search index will not be created
       print('Warning: FTS5 not available, full-text search disabled: $e');
+    }
+  }
+
+  /// Migrate from earlier schema versions to v4.
+  ///
+  /// v3 → v4: renamed points_blob → raw_points_blob,
+  ///          renamed fitted_points_blob → render_points_blob,
+  ///          added archive_raw_data column to chapters.
+  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 4) {
+      // Rename stroke blob columns
+      await db.execute(
+          'ALTER TABLE strokes RENAME COLUMN points_blob TO raw_points_blob');
+
+      // fitted_points_blob may or may not exist (added in v3)
+      try {
+        await db.execute(
+            'ALTER TABLE strokes RENAME COLUMN fitted_points_blob TO render_points_blob');
+      } on DatabaseException {
+        // Column didn't exist (v1/v2 → v4) — add it fresh
+        await db.execute(
+            'ALTER TABLE strokes ADD COLUMN render_points_blob BLOB');
+      }
+
+      // archive_raw_data may already exist; ADD COLUMN is a no-op error if so
+      try {
+        await db.execute(
+            'ALTER TABLE chapters ADD COLUMN archive_raw_data INTEGER NOT NULL DEFAULT 0');
+      } on DatabaseException {
+        // Column already exists — fine
+      }
     }
   }
 

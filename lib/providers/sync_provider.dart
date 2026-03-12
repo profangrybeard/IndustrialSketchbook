@@ -15,15 +15,15 @@ final syncEngineProvider = ChangeNotifierProvider<SyncEngine>((ref) {
   final db = ref.watch(databaseServiceProvider).value;
   final deviceId = ref.watch(deviceIdProvider).value;
 
-  // Guard: both DB and deviceId must be ready
+  // Guard: both DB and deviceId must be ready.
+  // If DB failed to initialize (e.g. migration error), throw so the
+  // error propagates instead of crashing with an unguarded StateError.
+  final dbAsync = ref.watch(databaseServiceProvider);
+  if (dbAsync.hasError) {
+    throw dbAsync.error!;
+  }
   if (db == null || deviceId == null) {
-    // Return a placeholder engine that will be replaced once deps resolve.
-    // This shouldn't happen in practice since AppShell waits for DB.
-    return SyncEngine(
-      DriveService(authService),
-      db ?? (throw StateError('DB not ready')),
-      deviceId ?? 'unknown',
-    );
+    throw StateError('Database or device ID not ready for sync');
   }
 
   final drive = DriveService(authService);
