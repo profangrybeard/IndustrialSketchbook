@@ -24,7 +24,6 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.29.2'
           channel: stable
 
       - name: Restore debug keystore
@@ -36,14 +35,7 @@ jobs:
         run: |
           REV=$(git rev-parse --short HEAD)
           DATE=$(date -u '+%Y-%m-%d %H:%M')
-          cat > lib/config/build_info.dart << EOF
-          /// Auto-generated build info. Updated before each release build.
-          ///
-          /// To regenerate, run the build process through Claude — the git hash and
-          /// timestamp are injected automatically before \`flutter build apk\`.
-          const String buildRevision = '$REV';
-          const String buildDate = '$DATE';
-          EOF
+          printf '/// Auto-generated build info.\nconst String buildRevision = '"'"'%s'"'"';\nconst String buildDate = '"'"'%s'"'"';\n' "$REV" "$DATE" > lib/config/build_info.dart
 
       - name: Get dependencies
         run: flutter pub get
