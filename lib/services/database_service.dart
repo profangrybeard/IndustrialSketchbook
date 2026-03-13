@@ -42,7 +42,7 @@ class DatabaseService {
 
     _db = await openDatabase(
       dbPath,
-      version: 4,
+      version: 5,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
       onConfigure: (db) async {
@@ -114,6 +114,7 @@ class DatabaseService {
         opacity REAL NOT NULL,
         raw_points_blob BLOB NOT NULL,
         render_points_blob BLOB,
+        spine_blob BLOB,
         created_at TEXT NOT NULL,
         is_tombstone INTEGER NOT NULL DEFAULT 0,
         erases_stroke_id TEXT,
@@ -252,6 +253,9 @@ class DatabaseService {
       } on DatabaseException {
         // Column already exists — fine
       }
+    }
+    if (oldVersion < 5) {
+      await db.execute('ALTER TABLE strokes ADD COLUMN spine_blob BLOB');
     }
   }
 
@@ -858,6 +862,31 @@ class DatabaseService {
       where: 'page_id = ?',
       whereArgs: [pageId],
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Spine blob backfill (Option A — pre-baked spine points)
+  // ---------------------------------------------------------------------------
+
+  /// Update the spine_blob for a single stroke.
+  Future<void> updateSpineBlob(String strokeId, Uint8List spineBlob) async {
+    await db.update(
+      'strokes',
+      {'spine_blob': spineBlob},
+      where: 'id = ?',
+      whereArgs: [strokeId],
+    );
+  }
+
+  /// Get IDs of non-tombstone strokes that don't have pre-baked spine data.
+  Future<List<String>> getStrokeIdsWithoutSpines({int limit = 100}) async {
+    final rows = await db.query(
+      'strokes',
+      columns: ['id'],
+      where: 'spine_blob IS NULL AND is_tombstone = 0',
+      limit: limit,
+    );
+    return rows.map((r) => r['id'] as String).toList();
   }
 
   /// Purge ALL data from the database — nuclear option for dev/schema resets.

@@ -2,5 +2,5 @@
 ///
 /// To regenerate, run the build process through Claude — the git hash and
 /// timestamp are injected automatically before `flutter build apk`.
-const String buildRevision = '6b1ee29';
-const String buildDate = '2026-03-12 15:45';
+const String buildRevision = '7b62be9';
+const String buildDate = '2026-03-13 03:53';

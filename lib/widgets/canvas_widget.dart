@@ -262,6 +262,8 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
           if (!mounted || gen != _loadGeneration) return;
           if (strokes.isNotEmpty) {
             drawingService.loadStrokes(strokes);
+            // Async backfill spine data for pre-v5 strokes (fire-and-forget)
+            drawingService.backfillSpines(db);
           }
 
           // Load page settings (grid style, spacing, paper color)
@@ -491,7 +493,6 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                 _strokeRasterCache.invalidate();
                 setState(() {
                   _strokesLoaded = false;
-                  _pageReady = false;
                 });
               }
             },
@@ -518,6 +519,8 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                   final ds = ref.read(drawingServiceProvider);
                   final oldCount = ds.committedStrokes.length;
                   ds.loadStrokes(strokes);
+                  // Async backfill spine data for pre-v5 strokes
+                  ds.backfillSpines(db);
                   _strokeRasterCache.invalidate();
                   debugPrint('Post-sync reload: was $oldCount strokes, '
                       'now ${strokes.length}, version=${ds.strokeVersion}');

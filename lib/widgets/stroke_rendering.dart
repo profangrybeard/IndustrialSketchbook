@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../models/pressure_mode.dart';
+import '../models/spine_point.dart';
 import '../models/stroke.dart';
 import '../models/stroke_point.dart';
 import '../models/tool_type.dart';
@@ -126,6 +127,63 @@ double _cubicEval(double t, double a, double b, double c, double d) {
       3 * mt * mt * t * b +
       3 * mt * t * t * c +
       t * t * t * d;
+}
+
+// ---------------------------------------------------------------------------
+// Pre-baked spine computation (Option A performance fix)
+// ---------------------------------------------------------------------------
+
+/// Compute spine points from raw [StrokePoint]s via Catmull-Rom subdivision.
+///
+/// Returns interpolated (x, y, pressure) at each subdivision sample.
+/// Called once at pen-up and stored in SQLite as a binary blob. On page load,
+/// the renderer uses the stored spines directly, skipping the expensive
+/// Catmull-Rom subdivision entirely (~60-70% of recording-phase CPU savings).
+///
+/// Uses [replayTargetArcLength] by default (3.0px) for coarser subdivision
+/// that is visually near-identical to the 0.5px live-drawing fidelity.
+List<SpinePoint> computeSpinePoints(
+  List<StrokePoint> points, {
+  double targetArcLength = replayTargetArcLength,
+}) {
+  if (points.isEmpty) return const [];
+  if (points.length == 1) {
+    return [SpinePoint(points[0].x, points[0].y, points[0].pressure)];
+  }
+
+  final result = <SpinePoint>[];
+
+  // Add the first point
+  result.add(SpinePoint(points[0].x, points[0].y, points[0].pressure));
+
+  // Catmull-Rom spline through all points
+  for (int i = 0; i < points.length - 1; i++) {
+    final p0 = points[i > 0 ? i - 1 : 0];
+    final p1 = points[i];
+    final p2 = points[i + 1];
+    final p3 = points[i + 2 < points.length ? i + 2 : points.length - 1];
+
+    // Catmull-Rom → cubic Bezier control points
+    final cp1x = p1.x + (p2.x - p0.x) / 6;
+    final cp1y = p1.y + (p2.y - p0.y) / 6;
+    final cp2x = p2.x - (p3.x - p1.x) / 6;
+    final cp2y = p2.y - (p3.y - p1.y) / 6;
+
+    // Adaptive subdivision based on chord length
+    final chordLen = math.sqrt(
+        (p2.x - p1.x) * (p2.x - p1.x) + (p2.y - p1.y) * (p2.y - p1.y));
+    final subs = _adaptiveSubdivisions(chordLen, targetArcLength: targetArcLength);
+
+    for (int s = 1; s <= subs; s++) {
+      final t = s / subs;
+      final x = _cubicEval(t, p1.x, cp1x, cp2x, p2.x);
+      final y = _cubicEval(t, p1.y, cp1y, cp2y, p2.y);
+      final pressure = p1.pressure + (p2.pressure - p1.pressure) * t;
+      result.add(SpinePoint(x, y, pressure));
+    }
+  }
+
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -383,37 +441,45 @@ void _renderStandardStroke(Canvas canvas, Stroke stroke, Paint paint, {double ta
     return;
   }
 
-  // 3+ points: evaluate Catmull-Rom spline → spine points with half-widths
+  // 3+ points: build spine points with half-widths for ribbon rendering.
+  // Use pre-baked spines if available (Option A), otherwise compute on-the-fly.
   final spinePoints = <_SpinePoint>[];
+  final prebaked = stroke.spineData;
 
-  // Add the first point
-  spinePoints.add(_SpinePoint(points[0].x, points[0].y,
-      stroke.weight * math.max(points[0].pressure, 0.1) / 2.0));
+  if (prebaked != null && prebaked.length >= 2) {
+    // Fast path: pre-baked spines — skip Catmull-Rom subdivision entirely.
+    for (final sp in prebaked) {
+      final halfW = stroke.weight * math.max(sp.pressure, 0.1) / 2.0;
+      spinePoints.add(_SpinePoint(sp.x, sp.y, halfW));
+    }
+  } else {
+    // Fallback: compute on-the-fly (old strokes without spine data)
+    spinePoints.add(_SpinePoint(points[0].x, points[0].y,
+        stroke.weight * math.max(points[0].pressure, 0.1) / 2.0));
 
-  for (int i = 0; i < points.length - 1; i++) {
-    final p0 = points[i > 0 ? i - 1 : 0];
-    final p1 = points[i];
-    final p2 = points[i + 1];
-    final p3 = points[i + 2 < points.length ? i + 2 : points.length - 1];
+    for (int i = 0; i < points.length - 1; i++) {
+      final p0 = points[i > 0 ? i - 1 : 0];
+      final p1 = points[i];
+      final p2 = points[i + 1];
+      final p3 = points[i + 2 < points.length ? i + 2 : points.length - 1];
 
-    // Catmull-Rom → cubic Bezier control points
-    final cp1x = p1.x + (p2.x - p0.x) / 6;
-    final cp1y = p1.y + (p2.y - p0.y) / 6;
-    final cp2x = p2.x - (p3.x - p1.x) / 6;
-    final cp2y = p2.y - (p3.y - p1.y) / 6;
+      final cp1x = p1.x + (p2.x - p0.x) / 6;
+      final cp1y = p1.y + (p2.y - p0.y) / 6;
+      final cp2x = p2.x - (p3.x - p1.x) / 6;
+      final cp2y = p2.y - (p3.y - p1.y) / 6;
 
-    // Adaptive subdivision: longer segments get more subdivisions
-    final chordLen = math.sqrt(
-        (p2.x - p1.x) * (p2.x - p1.x) + (p2.y - p1.y) * (p2.y - p1.y));
-    final subs = _adaptiveSubdivisions(chordLen);
+      final chordLen = math.sqrt(
+          (p2.x - p1.x) * (p2.x - p1.x) + (p2.y - p1.y) * (p2.y - p1.y));
+      final subs = _adaptiveSubdivisions(chordLen, targetArcLength: targetArcLength);
 
-    for (int s = 1; s <= subs; s++) {
-      final t = s / subs;
-      final x = _cubicEval(t, p1.x, cp1x, cp2x, p2.x);
-      final y = _cubicEval(t, p1.y, cp1y, cp2y, p2.y);
-      final pressure = p1.pressure + (p2.pressure - p1.pressure) * t;
-      final halfW = stroke.weight * math.max(pressure, 0.1) / 2.0;
-      spinePoints.add(_SpinePoint(x, y, halfW));
+      for (int s = 1; s <= subs; s++) {
+        final t = s / subs;
+        final x = _cubicEval(t, p1.x, cp1x, cp2x, p2.x);
+        final y = _cubicEval(t, p1.y, cp1y, cp2y, p2.y);
+        final pressure = p1.pressure + (p2.pressure - p1.pressure) * t;
+        final halfW = stroke.weight * math.max(pressure, 0.1) / 2.0;
+        spinePoints.add(_SpinePoint(x, y, halfW));
+      }
     }
   }
 
@@ -496,60 +562,18 @@ void _renderPencilStroke(
     return;
   }
 
-  // 3+ points: evaluate Catmull-Rom spline → spine points with half-widths
-  // and per-point opacity for pencil effects.
-  // Phase 2: tilt and velocity dropped. Only pressure + grain affect visuals.
+  // 3+ points: build spine points with half-widths and per-point opacity.
+  // Use pre-baked spines if available (Option A), otherwise compute on-the-fly.
   final spinePoints = <_SpinePoint>[];
   final spineAlphas = <double>[];
+  final prebaked = stroke.spineData;
 
-  // Compute properties for first point
-  final firstP = points[0];
-  final firstPencilP = pencilPressure(firstP.pressure, exponent: pressureExponent);
-  double firstHW;
-  switch (pressureMode) {
-    case PressureMode.opacity:
-      firstHW = stroke.weight / 2.0;
-    case PressureMode.width:
-    case PressureMode.both:
-      firstHW = stroke.weight * math.max(firstPencilP, 0.1) / 2.0;
-  }
-  spinePoints.add(_SpinePoint(firstP.x, firstP.y, firstHW));
-
-  double firstAlpha;
-  switch (pressureMode) {
-    case PressureMode.width:
-      firstAlpha = baseAlpha * 0.7;
-    case PressureMode.opacity:
-    case PressureMode.both:
-      firstAlpha = baseAlpha * 0.7 * math.max(firstPencilP, 0.1);
-  }
-  spineAlphas.add(firstAlpha.clamp(0.01, 1.0));
-
-  for (int i = 0; i < points.length - 1; i++) {
-    final p0 = points[i > 0 ? i - 1 : 0];
-    final p1 = points[i];
-    final p2 = points[i + 1];
-    final p3 = points[i + 2 < points.length ? i + 2 : points.length - 1];
-
-    // Catmull-Rom → cubic Bezier control points
-    final cp1x = p1.x + (p2.x - p0.x) / 6;
-    final cp1y = p1.y + (p2.y - p0.y) / 6;
-    final cp2x = p2.x - (p3.x - p1.x) / 6;
-    final cp2y = p2.y - (p3.y - p1.y) / 6;
-
-    // Adaptive subdivision: longer segments get more subdivisions
-    final chordLen = math.sqrt(
-        (p2.x - p1.x) * (p2.x - p1.x) + (p2.y - p1.y) * (p2.y - p1.y));
-    final subs = _adaptiveSubdivisions(chordLen);
-
-    for (int s = 1; s <= subs; s++) {
-      final t = s / subs;
-      final x = _cubicEval(t, p1.x, cp1x, cp2x, p2.x);
-      final y = _cubicEval(t, p1.y, cp1y, cp2y, p2.y);
-
-      final pressure = p1.pressure + (p2.pressure - p1.pressure) * t;
-      final pencilP = pencilPressure(pressure, exponent: pressureExponent);
-      final grain = grainFactor(x, y, grainIntensity);
+  if (prebaked != null && prebaked.length >= 2) {
+    // Fast path: pre-baked spines — skip Catmull-Rom subdivision entirely.
+    // Compute halfWidth and alpha from stored pressure + current params.
+    for (final sp in prebaked) {
+      final pencilP = pencilPressure(sp.pressure, exponent: pressureExponent);
+      final grain = grainFactor(sp.x, sp.y, grainIntensity);
 
       double hw;
       double alpha;
@@ -565,8 +589,74 @@ void _renderPencilStroke(
           alpha = baseAlpha * 0.7 * math.max(pencilP, 0.1) * grain;
       }
 
-      spinePoints.add(_SpinePoint(x, y, hw));
+      spinePoints.add(_SpinePoint(sp.x, sp.y, hw));
       spineAlphas.add(alpha.clamp(0.01, 1.0));
+    }
+  } else {
+    // Fallback: compute on-the-fly (old strokes without spine data)
+    final firstP = points[0];
+    final firstPencilP = pencilPressure(firstP.pressure, exponent: pressureExponent);
+    double firstHW;
+    switch (pressureMode) {
+      case PressureMode.opacity:
+        firstHW = stroke.weight / 2.0;
+      case PressureMode.width:
+      case PressureMode.both:
+        firstHW = stroke.weight * math.max(firstPencilP, 0.1) / 2.0;
+    }
+    spinePoints.add(_SpinePoint(firstP.x, firstP.y, firstHW));
+
+    double firstAlpha;
+    switch (pressureMode) {
+      case PressureMode.width:
+        firstAlpha = baseAlpha * 0.7;
+      case PressureMode.opacity:
+      case PressureMode.both:
+        firstAlpha = baseAlpha * 0.7 * math.max(firstPencilP, 0.1);
+    }
+    spineAlphas.add(firstAlpha.clamp(0.01, 1.0));
+
+    for (int i = 0; i < points.length - 1; i++) {
+      final p0 = points[i > 0 ? i - 1 : 0];
+      final p1 = points[i];
+      final p2 = points[i + 1];
+      final p3 = points[i + 2 < points.length ? i + 2 : points.length - 1];
+
+      final cp1x = p1.x + (p2.x - p0.x) / 6;
+      final cp1y = p1.y + (p2.y - p0.y) / 6;
+      final cp2x = p2.x - (p3.x - p1.x) / 6;
+      final cp2y = p2.y - (p3.y - p1.y) / 6;
+
+      final chordLen = math.sqrt(
+          (p2.x - p1.x) * (p2.x - p1.x) + (p2.y - p1.y) * (p2.y - p1.y));
+      final subs = _adaptiveSubdivisions(chordLen, targetArcLength: targetArcLength);
+
+      for (int s = 1; s <= subs; s++) {
+        final t = s / subs;
+        final x = _cubicEval(t, p1.x, cp1x, cp2x, p2.x);
+        final y = _cubicEval(t, p1.y, cp1y, cp2y, p2.y);
+
+        final pressure = p1.pressure + (p2.pressure - p1.pressure) * t;
+        final pencilP = pencilPressure(pressure, exponent: pressureExponent);
+        final grain = grainFactor(x, y, grainIntensity);
+
+        double hw;
+        double alpha;
+        switch (pressureMode) {
+          case PressureMode.width:
+            hw = stroke.weight * math.max(pencilP, 0.1) / 2.0;
+            alpha = baseAlpha * 0.7 * grain;
+          case PressureMode.opacity:
+            hw = stroke.weight / 2.0;
+            alpha = baseAlpha * 0.7 * math.max(pencilP, 0.1) * grain;
+          case PressureMode.both:
+            hw = stroke.weight * math.max(pencilP, 0.1) / 2.0;
+            alpha = baseAlpha * 0.7 * math.max(pencilP, 0.1) * grain;
+        }
+
+        spinePoints.add(_SpinePoint(x, y, hw));
+        spineAlphas.add(alpha.clamp(0.01, 1.0));
+      }
     }
   }
 

@@ -2,6 +2,7 @@ import 'dart:typed_data';
 import 'dart:ui';
 
 import 'render_point.dart';
+import 'spine_point.dart';
 import 'stroke_point.dart';
 import 'tool_type.dart';
 
@@ -46,6 +47,15 @@ class Stroke {
   /// or strokes created before the v4 overhaul.
   final List<RenderPoint>? renderData;
 
+  /// Pre-computed spine points from Catmull-Rom subdivision (Option A).
+  ///
+  /// Computed once at pen-up using [replayTargetArcLength] and stored in
+  /// SQLite as a binary blob. When present, the renderer skips the expensive
+  /// Catmull-Rom subdivision loop entirely, using stored (x, y, pressure)
+  /// to build ribbon geometry directly. Null for tombstones or strokes
+  /// created before the v5 schema.
+  final List<SpinePoint>? spineData;
+
   /// Bridge getter for the rendering pipeline (Phase 1 compat).
   ///
   /// Always returns raw [points] for display — no visible smoothing.
@@ -76,6 +86,7 @@ class Stroke {
     required this.opacity,
     required this.points,
     this.renderData,
+    this.spineData,
     required this.createdAt,
     this.isTombstone = false,
     this.erasesStrokeId,
@@ -238,6 +249,8 @@ class Stroke {
         'raw_points_blob': StrokePoint.packAll(points),
         'render_points_blob':
             renderData != null ? RenderPoint.packAll(renderData!) : null,
+        'spine_blob':
+            spineData != null ? SpinePoint.packAll(spineData!) : null,
         'created_at': createdAt.toUtc().toIso8601String(),
         'is_tombstone': isTombstone ? 1 : 0,
         'erases_stroke_id': erasesStrokeId,
@@ -256,6 +269,9 @@ class Stroke {
         points: StrokePoint.unpackAll(map['raw_points_blob'] as Uint8List),
         renderData: map['render_points_blob'] != null
             ? RenderPoint.unpackAll(map['render_points_blob'] as Uint8List)
+            : null,
+        spineData: map['spine_blob'] != null
+            ? SpinePoint.unpackAll(map['spine_blob'] as Uint8List)
             : null,
         createdAt: DateTime.parse(map['created_at'] as String),
         isTombstone: (map['is_tombstone'] as int) == 1,
