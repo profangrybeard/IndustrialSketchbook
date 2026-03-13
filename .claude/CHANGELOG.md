@@ -8,6 +8,51 @@
 
 ---
 
+## Performance Option A — Pre-Baked Spine Points
+**Date:** 2026-03-13 | **Tests:** 383 pass | **Base:** rebased on `main`
+
+### Problem
+Heavy drawings (100+ strokes per page) took 10-30+ seconds to load on the Samsung Tab S9 Ultra. The bottleneck: `CommittedStrokesPainter.paint()` ran Catmull-Rom spline subdivision for every committed stroke on the UI thread during each full rebuild. A 200-point stroke generates ~600 spine points via subdivision — pure geometry that never changes once committed.
+
+### Solution
+Compute spine subdivision **once at pen-up**, store the result in SQLite as a binary blob, skip subdivision entirely on page load. Cuts ~60-70% of the recording-phase CPU time.
+
+### What changed
+
+**1. New model: `SpinePoint` (x, y, pressure) — 12 bytes packed**
+- Stores interpolated pressure (not halfWidth) so spine blobs remain valid when users change pressureMode, weight, or grainIntensity after drawing.
+- Binary pack/unpack follows same pattern as StrokePoint and RenderPoint.
+
+**2. `computeSpinePoints()` extracted from rendering loop**
+- Public function in `stroke_rendering.dart` consolidates the Catmull-Rom subdivision logic that previously existed inline in both `_renderStandardStroke` and `_renderPencilStroke`.
+- Uses `replayTargetArcLength = 3.0` (coarser than live drawing's 0.5px).
+
+**3. Dual rendering path — fast path + fallback**
+- When `stroke.spineData` exists: builds ribbon geometry directly from stored (x, y, pressure), computing halfWidth/alpha from current rendering params. Skips the entire Catmull-Rom loop.
+- When `stroke.spineData` is null: falls back to on-the-fly subdivision (backward compat for pre-v5 strokes).
+
+**4. DB schema v4 -> v5**
+- New `spine_blob BLOB` column on `strokes` table.
+- `_onUpgrade` adds column for existing installs. No data migration needed — null triggers fallback.
+
+**5. Pen-up computation + lazy backfill**
+- `DrawingService.onPointerUp()` computes spine data and attaches to the committed Stroke.
+- `backfillSpines(db)` runs async after `loadStrokes()` — computes and persists spine data for old strokes without blocking page display.
+
+### Files
+| File | Change |
+|------|--------|
+| `lib/models/spine_point.dart` | NEW — 12-byte binary model |
+| `lib/models/stroke.dart` | Added `spineData` field, updated toDbMap/fromDbMap |
+| `lib/widgets/stroke_rendering.dart` | Extracted `computeSpinePoints()`, dual render path |
+| `lib/services/database_service.dart` | Schema v5, spine_blob column, backfill helpers |
+| `lib/services/drawing_service.dart` | Compute at pen-up, `backfillSpines()` |
+| `lib/widgets/canvas_widget.dart` | Wired backfill calls at both load sites |
+| `test/models/spine_point_test.dart` | NEW — pack/unpack round-trip tests |
+| `test/widgets/spine_computation_test.dart` | NEW — subdivision regression tests |
+
+---
+
 ## Phase 2.6 — Inline Color Picker, Pressure Modes & Realistic Pencil
 **Commit:** `5fb92d6` | **Date:** 2025-03-07 | **Tests:** 102 pass
 

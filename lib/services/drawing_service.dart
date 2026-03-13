@@ -8,11 +8,14 @@ import '../models/pencil_lead.dart';
 import '../models/pressure_curve.dart';
 import '../models/pressure_mode.dart';
 import '../models/render_point.dart';
+import '../models/spine_point.dart';
 import '../models/stroke.dart';
 import '../models/stroke_point.dart';
 import '../models/tool_type.dart';
 import '../models/undo_action.dart';
 import '../utils/curve_fitter.dart';
+import '../widgets/stroke_rendering.dart' show computeSpinePoints;
+import 'database_service.dart';
 
 // ---------------------------------------------------------------------------
 // Raster cache mutation metadata
@@ -472,6 +475,14 @@ class DrawingService extends ChangeNotifier {
     // store device coordinates as fallback (canvas dims should always
     // be set by CanvasWidget before any drawing occurs).
     final hasCanvasDims = _canvasWidth > 0 && _canvasHeight > 0;
+
+    // Pre-bake spine points at replay arc length for fast page-load rendering.
+    // This is the Option A performance fix — compute once, skip subdivision
+    // on every subsequent page load.
+    final spineData = frozenPoints.length >= 2
+        ? computeSpinePoints(frozenPoints)
+        : null;
+
     final committed = Stroke(
       id: stroke.id,
       pageId: stroke.pageId,
@@ -488,6 +499,7 @@ class DrawingService extends ChangeNotifier {
               : RenderPoint(
                   x: sp.x, y: sp.y, pressure: sp.pressure))
           .toList(),
+      spineData: spineData,
       createdAt: DateTime.now().toUtc(),
     );
 
@@ -511,6 +523,54 @@ class DrawingService extends ChangeNotifier {
     _bumpVersion();
     clearUndoHistory();
     notifyListeners();
+  }
+
+  /// Compute and persist spine data for committed strokes that lack it.
+  ///
+  /// Called after [loadStrokes] to backfill old strokes created before the
+  /// v5 schema. Computes spine points, replaces the Stroke objects in
+  /// [committedStrokes] with spine-enriched copies, and fire-and-forget
+  /// persists the spine blobs to SQLite.
+  ///
+  /// The first load of old data still pays the Catmull-Rom cost, but
+  /// subsequent loads of the same page are fast (spines already in DB).
+  Future<void> backfillSpines(DatabaseService db) async {
+    bool anyUpdated = false;
+    for (int i = 0; i < committedStrokes.length; i++) {
+      final stroke = committedStrokes[i];
+      if (stroke.spineData != null || stroke.points.length < 2 || stroke.isTombstone) {
+        continue;
+      }
+
+      final spines = computeSpinePoints(stroke.points);
+      // Replace with spine-enriched copy
+      committedStrokes[i] = Stroke(
+        id: stroke.id,
+        pageId: stroke.pageId,
+        layerId: stroke.layerId,
+        tool: stroke.tool,
+        color: stroke.color,
+        weight: stroke.weight,
+        opacity: stroke.opacity,
+        points: stroke.points,
+        renderData: stroke.renderData,
+        spineData: spines,
+        createdAt: stroke.createdAt,
+        isTombstone: stroke.isTombstone,
+        erasesStrokeId: stroke.erasesStrokeId,
+        synced: stroke.synced,
+      );
+      anyUpdated = true;
+
+      // Fire-and-forget DB update
+      db.updateSpineBlob(stroke.id, SpinePoint.packAll(spines));
+    }
+
+    if (anyUpdated) {
+      _lastMutationInfo = const MutationInfo.fullRebuild();
+      _bumpVersion();
+      notifyListeners();
+    }
   }
 
   /// Clear all strokes (for page navigation).
