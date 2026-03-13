@@ -5,12 +5,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/chapter.dart';
 import '../models/notebooks_snapshot.dart';
-import '../models/render_point.dart';
 import '../models/sketch_page.dart';
 import '../models/sync_journal.dart';
 import '../models/stroke.dart';
 import '../models/stroke_point.dart';
 import '../models/sync_state.dart';
+import '../utils/coordinate_utils.dart';
 import 'database_service.dart';
 import 'drive_service.dart';
 
@@ -59,11 +59,6 @@ class SyncEngine extends ChangeNotifier {
     return view.physicalSize.width / view.devicePixelRatio;
   }
 
-  /// Logical canvas height of this device (for v2 renderData denormalization).
-  double get _localCanvasHeight {
-    final view = ui.PlatformDispatcher.instance.views.first;
-    return view.physicalSize.height / view.devicePixelRatio;
-  }
 
   /// Initialize — load persisted last sync time.
   Future<void> initialize() async {
@@ -152,7 +147,7 @@ class SyncEngine extends ChangeNotifier {
 
   /// Push unsynced strokes to Drive. Returns count of strokes pushed.
   ///
-  /// Phase 4: uses v2 compact format (renderData only, gzip compressed).
+  /// Uses v3 format: full stroke data in reference units, gzip compressed.
   /// Tombstone compaction omits stroke+tombstone pairs from the same batch.
   Future<int> _push() async {
     _state = const SyncPushing(phase: 'Checking unsynced strokes...');
@@ -165,8 +160,8 @@ class SyncEngine extends ChangeNotifier {
       return 0;
     }
 
-    // Phase 4: tombstone compaction — if a stroke and its tombstone are
-    // both in the push batch, omit both (the net effect is no change).
+    // Tombstone compaction — if a stroke and its tombstone are both in
+    // the push batch, omit both (the net effect is no change).
     final compacted = _compactTombstones(strokes);
     final compactedCount = strokes.length - compacted.length;
     if (compactedCount > 0) {
@@ -183,7 +178,7 @@ class SyncEngine extends ChangeNotifier {
       final batch = compacted.sublist(i, end);
 
       final journal = SyncJournal(
-        version: 2,
+        version: 3,
         deviceId: _deviceId,
         createdAt: DateTime.now().toUtc().toIso8601String(),
         strokes: batch,
@@ -330,9 +325,9 @@ class SyncEngine extends ChangeNotifier {
     notifyListeners();
 
     // 4. Download and merge each journal (per-stroke error handling)
-    // Phase 4: v2 journals (.json.gz) use downloadGzip; v1 (.json) use downloadJson.
-    // v2 journals have normalized coordinates — no scaling needed.
-    // v1 journals may need cross-device canvasWidth scaling (legacy).
+    // v3: reference units — insert directly with coordFormat=1
+    // v2: renderData (0.0–1.0) — convert to reference units
+    // v1: world coords + canvasWidth — scale to reference units
     final localWidth = _localCanvasWidth;
     int imported = 0;
     int skipped = 0;
@@ -340,7 +335,6 @@ class SyncEngine extends ChangeNotifier {
     int journalsDone = 0;
     for (final file in newJournals) {
       try {
-        // Detect format from filename extension
         final isGzip = file.name.endsWith('.json.gz');
         final json = isGzip
             ? await _drive.downloadGzip(file.id)
@@ -349,32 +343,19 @@ class SyncEngine extends ChangeNotifier {
         debugPrint('Pull: processing ${file.name} '
             '(v${journal.version}, ${journal.strokes.length} strokes)');
 
-        // v1 journals: legacy scaling if canvas widths differ
-        // v2 journals: coordinates are normalized 0.0–1.0, no scaling needed
-        final needsScale = journal.version < 2 &&
-            journal.canvasWidth != null &&
-            localWidth > 0 &&
-            (journal.canvasWidth! - localWidth).abs() > 10;
-        final scaleFactor =
-            needsScale ? localWidth / journal.canvasWidth! : 1.0;
-        if (needsScale) {
-          debugPrint('Pull: v1 scaling '
-              '${journal.canvasWidth!.toStringAsFixed(0)}'
-              ' -> ${localWidth.toStringAsFixed(0)}'
-              ' (factor=${scaleFactor.toStringAsFixed(3)})');
-        }
-
         for (final stroke in journal.strokes) {
           try {
-            // v1: legacy coordinate scaling
-            // v2: denormalize renderData (0.0–1.0) to device-pixel points
             Stroke s;
-            if (needsScale) {
-              s = _scaleStroke(stroke, scaleFactor);
-            } else if (journal.version >= 2) {
-              s = _denormalizeStroke(stroke);
-            } else {
+            if (journal.version >= 3) {
+              // v3: already in reference units with coordFormat=1
+              // (set by SyncJournal.fromJson). Insert directly.
               s = stroke;
+            } else if (journal.version >= 2) {
+              // v2: denormalize renderData (0.0–1.0) → reference units
+              s = _denormalizeV2Stroke(stroke);
+            } else {
+              // v1: world coords — scale to reference units
+              s = _convertV1Stroke(stroke, journal.canvasWidth, localWidth);
             }
             final inserted = await _db.insertStrokeIfNotExists(s);
             if (inserted) {
@@ -383,8 +364,6 @@ class SyncEngine extends ChangeNotifier {
               skipped++;
             }
           } catch (e) {
-            // Per-stroke catch: skip strokes with missing pages (FK error)
-            // or other DB issues without killing the whole journal
             errors++;
           }
         }
@@ -436,8 +415,31 @@ class SyncEngine extends ChangeNotifier {
     debugPrint('Pull structure: upsert complete');
   }
 
-  /// Scale stroke coordinates and weight for cross-device display.
-  Stroke _scaleStroke(Stroke stroke, double factor) {
+  /// Convert a v1 synced stroke (world coords + canvasWidth) to reference units.
+  ///
+  /// v1 strokes have device-pixel coordinates. We convert to reference units:
+  /// refX = point.x / sourceCanvasWidth * 1000.0
+  Stroke _convertV1Stroke(Stroke stroke, double? sourceWidth, double localWidth) {
+    if (stroke.points.isEmpty) {
+      return Stroke(
+        id: stroke.id,
+        pageId: stroke.pageId,
+        layerId: stroke.layerId,
+        tool: stroke.tool,
+        color: stroke.color,
+        weight: stroke.weight / (sourceWidth ?? localWidth) * CoordinateUtils.referenceWidth,
+        opacity: stroke.opacity,
+        points: const [],
+        createdAt: stroke.createdAt,
+        isTombstone: stroke.isTombstone,
+        erasesStrokeId: stroke.erasesStrokeId,
+        synced: true,
+        coordFormat: 1,
+      );
+    }
+
+    final srcWidth = sourceWidth ?? localWidth;
+    final factor = CoordinateUtils.referenceWidth / srcWidth;
     final scaledPoints = stroke.points
         .map((p) => StrokePoint(
               x: p.x * factor,
@@ -461,25 +463,40 @@ class SyncEngine extends ChangeNotifier {
       createdAt: stroke.createdAt,
       isTombstone: stroke.isTombstone,
       erasesStrokeId: stroke.erasesStrokeId,
-      synced: stroke.synced,
+      synced: true,
+      coordFormat: 1,
     );
   }
 
-  /// Denormalize a v2 synced stroke: convert renderData (0.0–1.0) into
-  /// device-pixel [StrokePoint] objects so the rendering pipeline can display
-  /// them via the [renderPoints] bridge getter.
+  /// Convert a v2 synced stroke (renderData 0.0–1.0) to reference units.
   ///
-  /// If the stroke has no renderData (e.g. tombstones), returns it unchanged.
-  Stroke _denormalizeStroke(Stroke stroke) {
+  /// v2 renderData is normalized to 0.0–1.0 of one screen width.
+  /// Reference units = renderData * 1000.0 (the referenceWidth).
+  Stroke _denormalizeV2Stroke(Stroke stroke) {
     final rd = stroke.renderData;
-    if (rd == null || rd.isEmpty) return stroke;
+    if (rd == null || rd.isEmpty) {
+      return Stroke(
+        id: stroke.id,
+        pageId: stroke.pageId,
+        layerId: stroke.layerId,
+        tool: stroke.tool,
+        color: stroke.color,
+        weight: stroke.weight,
+        opacity: stroke.opacity,
+        points: const [],
+        createdAt: stroke.createdAt,
+        isTombstone: stroke.isTombstone,
+        erasesStrokeId: stroke.erasesStrokeId,
+        synced: true,
+        coordFormat: 1,
+      );
+    }
 
-    final w = _localCanvasWidth;
-    final h = _localCanvasHeight;
-    final denormalized = rd
+    final refW = CoordinateUtils.referenceWidth;
+    final points = rd
         .map((rp) => StrokePoint(
-              x: rp.x * w,
-              y: rp.y * h,
+              x: rp.x * refW,
+              y: rp.y * refW,
               pressure: rp.pressure,
               tiltX: 0.0,
               tiltY: 0.0,
@@ -496,12 +513,12 @@ class SyncEngine extends ChangeNotifier {
       color: stroke.color,
       weight: stroke.weight,
       opacity: stroke.opacity,
-      points: denormalized,
-      renderData: rd,
+      points: points,
       createdAt: stroke.createdAt,
       isTombstone: stroke.isTombstone,
       erasesStrokeId: stroke.erasesStrokeId,
       synced: true,
+      coordFormat: 1,
     );
   }
 

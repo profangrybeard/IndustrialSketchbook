@@ -34,6 +34,7 @@ void main() {
         pressureMode: pressureMode,
         grainIntensity: grainIntensity,
         pressureExponent: pressureExponent,
+        replayArcLength: 1.5,
         tileCache: tileCache,
         spatialGrid: null,
         devicePixelRatio: 1.0,

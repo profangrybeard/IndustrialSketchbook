@@ -12,7 +12,6 @@ import 'package:uuid/uuid.dart';
 import '../models/camera.dart';
 import '../models/chapter.dart';
 import '../models/eraser_mode.dart';
-import '../models/render_point.dart';
 import '../models/grid_config.dart';
 import '../models/grid_style.dart';
 import '../models/page_style.dart';
@@ -27,8 +26,8 @@ import '../providers/drawing_provider.dart';
 import '../providers/notebook_provider.dart';
 import '../providers/snapshot_provider.dart';
 import '../services/drawing_service.dart';
-import '../utils/curve_fitter.dart';
 import '../utils/stroke_splitter.dart';
+import 'stroke_rendering.dart' show computeSpinePoints;
 import 'active_stroke_painter.dart';
 import 'background_painter.dart';
 import 'committed_strokes_painter.dart';
@@ -39,6 +38,7 @@ import 'page_strip.dart';
 import 'tile_cache.dart';
 import 'dev_menu_page.dart';
 import 'sync_settings_page.dart';
+import 'zoom_indicator.dart';
 
 const _uuid = Uuid();
 
@@ -161,10 +161,6 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
   // ---------------------------------------------------------------------------
   // Pressure deadzone (prevents accidental strokes from light touches)
   // ---------------------------------------------------------------------------
-
-  /// Minimum pressure required to start a stroke. Touches below this
-  /// threshold are ignored until pressure rises above it.
-  static const double _pressureDeadzone = 0.12;
 
   /// True when pen-down was rejected due to pressure below deadzone.
   /// Reset on pen-up. If pressure rises above threshold during a move,
@@ -292,11 +288,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
       });
     }
 
-    // Phase 2: feed canvas dimensions to DrawingService for coordinate
-    // normalization. The canvas fills the full Scaffold body, so
-    // MediaQuery.size gives us the logical pixel dimensions.
     final screenSize = MediaQuery.of(context).size;
-    drawingService.setCanvasDimensions(screenSize.width, screenSize.height);
 
     // During pinch, _renderCamera stays frozen at the pre-pinch state.
     // A compensating Transform handles the visual scaling/panning so
@@ -319,6 +311,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     }
 
     return Scaffold(
+      backgroundColor: _paperColor,
       body: Stack(
         children: [
           // Layers 1+2: Background + Committed strokes — wrapped in
@@ -357,10 +350,10 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                           strokeVersion: drawingService.strokeVersion,
                           pressureMode: drawingService.pressureMode,
                           grainIntensity:
-                              drawingService.currentLead?.grainIntensity ??
-                                  0.25,
+                              drawingService.effectiveGrainIntensity,
                           pressureExponent:
-                              drawingService.pressureCurve.exponent,
+                              drawingService.effectivePressureExponent,
+                          replayArcLength: drawingService.replayArcLength,
                           tileCache: _tileCache,
                           spatialGrid: drawingService.spatialGrid,
                           devicePixelRatio:
@@ -426,10 +419,10 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                                 _eraserCursorPosition != null,
                         pressureMode: drawingService.pressureMode,
                         grainIntensity:
-                            drawingService.currentLead?.grainIntensity ??
-                                0.25,
+                            drawingService.effectiveGrainIntensity,
                         pressureExponent:
-                            drawingService.pressureCurve.exponent,
+                            drawingService.effectivePressureExponent,
+                        liveArcLength: drawingService.liveArcLength,
                         suppressSinglePoint: !_hasStitchPoint,
                       ),
                       size: Size.infinite,
@@ -454,6 +447,26 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                 ),
               ),
             ),
+
+          // Zoom indicator — appears during pinch or when zoomed
+          Positioned(
+            bottom: 80,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: IgnorePointer(
+                ignoring: _camera.zoom == 1.0 && !_isPinching,
+                child: AnimatedOpacity(
+                  opacity: (_camera.zoom != 1.0 || _isPinching) ? 1.0 : 0.0,
+                  duration: const Duration(milliseconds: 200),
+                  child: ZoomIndicator(
+                    zoom: _camera.zoom,
+                    onResetTap: _resetZoom,
+                  ),
+                ),
+              ),
+            ),
+          ),
 
           // Floating palette layer (on top)
           FloatingPalette(
@@ -709,7 +722,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     // --- Pressure deadzone ---
     // Reject pen-down if pressure is below threshold to prevent
     // accidental strokes from light stylus contact.
-    if (event.pressure < _pressureDeadzone) {
+    if (event.pressure < drawingService.pressureDeadzone) {
       _belowDeadzone = true;
       return;
     }
@@ -761,7 +774,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     // Pressure deadzone: if pen-down was rejected, check if pressure
     // has risen above threshold. If so, start the stroke now.
     if (_belowDeadzone) {
-      if (event.pressure < _pressureDeadzone) return;
+      if (event.pressure < drawingService.pressureDeadzone) return;
       // Pressure crossed threshold — start stroke from this point
       _belowDeadzone = false;
       final point = _eventToPoint(event);
@@ -818,10 +831,12 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
         _lastCommittedWeight = committed.weight;
       }
 
-      // Invalidate tiles overlapping the new stroke
+      // Invalidate only tiles overlapping the new stroke; surviving tiles
+      // keep their cached images (revalidateRemaining re-stamps their version).
       if (committed.points.isNotEmpty) {
         _tileCache.invalidateRect(committed.boundingRect);
         _tileCache.bumpVersion();
+        _tileCache.revalidateRemaining();
       }
 
       // Push undo action for the drawn stroke
@@ -980,13 +995,10 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
       newlyErasedIds.add(stroke.id);
 
       for (final segment in segments) {
-        // Phase 2: re-fit split segments into normalized RenderPoints.
-        final cw = drawingService.canvasWidth;
-        final ch = drawingService.canvasHeight;
-        final hasCanvasDims = cw > 0 && ch > 0;
-        final fitted = CurveFitter.chaikinSmooth(
-          CurveFitter.simplify(segment),
-        );
+        // Pre-bake spine points for the split segment.
+        final spineData = segment.length >= 2
+            ? computeSpinePoints(segment)
+            : null;
         strokesToAdd.add(Stroke(
           id: _uuid.v4(),
           pageId: _pageId,
@@ -996,13 +1008,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
           weight: stroke.weight,
           opacity: stroke.opacity,
           points: segment,
-          renderData: fitted
-              .map((sp) => hasCanvasDims
-                  ? RenderPoint.fromStrokePoint(sp,
-                      canvasWidth: cw, canvasHeight: ch)
-                  : RenderPoint(
-                      x: sp.x, y: sp.y, pressure: sp.pressure))
-              .toList(),
+          spineData: spineData,
           createdAt: DateTime.now().toUtc(),
         ));
       }
@@ -1030,6 +1036,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
       if (dirtyRect != Rect.zero) {
         _tileCache.invalidateRect(dirtyRect);
         _tileCache.bumpVersion();
+        _tileCache.revalidateRemaining();
         drawingService.setMutationInfo(MutationInfo.dirtyRegion(dirtyRect));
       }
       drawingService.notifyListeners();
@@ -1094,6 +1101,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     drawingService.addCommittedStrokes([tombstone]);
     _tileCache.invalidateRect(newest.boundingRect);
     _tileCache.bumpVersion();
+    _tileCache.revalidateRemaining();
     drawingService.setMutationInfo(
         MutationInfo.dirtyRegion(newest.boundingRect));
     drawingService.notifyListeners();
@@ -1132,6 +1140,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     if (dirtyRect != Rect.zero) {
       _tileCache.invalidateRect(dirtyRect);
       _tileCache.bumpVersion();
+      _tileCache.revalidateRemaining();
       drawingService.setMutationInfo(MutationInfo.dirtyRegion(dirtyRect));
     }
 
@@ -1162,6 +1171,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     if (dirtyRect != Rect.zero) {
       _tileCache.invalidateRect(dirtyRect);
       _tileCache.bumpVersion();
+      _tileCache.revalidateRemaining();
       drawingService.setMutationInfo(MutationInfo.dirtyRegion(dirtyRect));
     }
 
