@@ -32,6 +32,7 @@ class CommittedStrokesPainter extends CustomPainter {
     required this.rasterCache,
     required this.devicePixelRatio,
     required this.lastMutationInfo,
+    this.dirtyRegionStrokeIds,
   }) : super(repaint: rasterCache);
 
   /// All committed strokes for the current page.
@@ -60,6 +61,10 @@ class CommittedStrokesPainter extends CustomPainter {
 
   /// Describes the most recent mutation for cache update path selection.
   final MutationInfo lastMutationInfo;
+
+  /// Pre-computed set of stroke IDs overlapping the dirty region.
+  /// When non-null, dirty-region rebuild uses this instead of O(N) scan.
+  final Set<String>? dirtyRegionStrokeIds;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -204,7 +209,12 @@ class CommittedStrokesPainter extends CustomPainter {
     for (final stroke in committedStrokes) {
       if (stroke.isTombstone) continue;
       if (erasedStrokeIds.contains(stroke.id)) continue;
-      if (!stroke.boundingRect.overlaps(dirtyRect)) continue;
+      // Use spatial grid result if available, otherwise fall back to overlap check.
+      if (dirtyRegionStrokeIds != null) {
+        if (!dirtyRegionStrokeIds!.contains(stroke.id)) continue;
+      } else {
+        if (!stroke.boundingRect.overlaps(dirtyRect)) continue;
+      }
       rendering.renderStroke(
         recCanvas,
         stroke,

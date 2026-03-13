@@ -366,6 +366,12 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                           MediaQuery.of(context).devicePixelRatio,
                       lastMutationInfo:
                           drawingService.lastMutationInfo,
+                      dirtyRegionStrokeIds: drawingService
+                                  .lastMutationInfo.dirtyRect !=
+                              null
+                          ? drawingService.queryStrokesInRect(
+                              drawingService.lastMutationInfo.dirtyRect!)
+                          : null,
                     ),
                     size: Size.infinite,
                   ),
@@ -913,13 +919,13 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     final newlyErasedIds = <String>{};
     final strokesToAdd = <Stroke>[];
 
-    // Iterate the committed list directly — no copy needed since we only
-    // append (via addCommittedStrokesForErase) AFTER the loop completes.
+    // Spatial grid query: O(1) lookup instead of scanning all strokes.
+    final candidateIds = drawingService.queryStrokesInRect(hitRect);
+
     for (final stroke in drawingService.committedStrokes) {
-      if (stroke.isTombstone) continue;
+      if (!candidateIds.contains(stroke.id)) continue;
       if (erasedIds.contains(stroke.id)) continue;
       if (newlyErasedIds.contains(stroke.id)) continue;
-      if (!stroke.boundingRect.overlaps(hitRect)) continue;
 
       final segments = splitStrokePoints(
         points: stroke.points,
@@ -981,7 +987,11 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
         }
       }
 
-      drawingService.addCommittedStrokes(strokesToAdd);
+      // Incremental grid update: remove erased strokes, insert new splits.
+      // This is O(K) where K = changed strokes, vs O(N) full rebuild.
+      drawingService.updateGridForErase(newlyErasedIds, strokesToAdd);
+      drawingService.addCommittedStrokesForErase(
+          strokesToAdd, newlyErasedIds);
       if (dirtyRect != Rect.zero) {
         drawingService.setMutationInfo(MutationInfo.dirtyRegion(dirtyRect));
       }
@@ -1013,9 +1023,17 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
 
     final erasedIds = drawingService.erasedStrokeIds;
 
+    // Spatial grid query: O(1) lookup instead of scanning all strokes.
+    final hitRect = Rect.fromCenter(
+      center: position,
+      width: hitRadius * 2,
+      height: hitRadius * 2,
+    );
+    final candidateIds = drawingService.queryStrokesInRect(hitRect);
+
     final candidates = <Stroke>[];
     for (final stroke in drawingService.committedStrokes) {
-      if (stroke.isTombstone) continue;
+      if (!candidateIds.contains(stroke.id)) continue;
       if (erasedIds.contains(stroke.id)) continue;
 
       final inflatedRect = stroke.boundingRect.inflate(hitRadius);

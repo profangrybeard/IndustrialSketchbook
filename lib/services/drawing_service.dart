@@ -14,6 +14,7 @@ import '../models/stroke_point.dart';
 import '../models/tool_type.dart';
 import '../models/undo_action.dart';
 import '../utils/curve_fitter.dart';
+import '../utils/spatial_grid.dart';
 import '../widgets/stroke_rendering.dart' show computeSpinePoints;
 import 'database_service.dart';
 
@@ -110,6 +111,55 @@ class DrawingService extends ChangeNotifier {
   Set<String> get erasedStrokeIds => _erasedStrokeIds;
 
   // ---------------------------------------------------------------------------
+  // Spatial grid index (Option D Phase 1)
+  // ---------------------------------------------------------------------------
+
+  /// Uniform grid hash for O(1) spatial queries on committed strokes.
+  /// Built on [loadStrokes], marked dirty on undo/redo, rebuilt lazily.
+  SpatialGrid? _spatialGrid;
+  bool _spatialGridDirty = true;
+
+  /// Query strokes whose bounding rects overlap [rect].
+  /// Lazily rebuilds the grid if marked dirty. Falls back to linear scan
+  /// if canvas dimensions aren't set yet.
+  Set<String> queryStrokesInRect(Rect rect) {
+    if (_spatialGridDirty) _rebuildSpatialGrid();
+    if (_spatialGrid != null) return _spatialGrid!.queryRect(rect);
+    // Fallback: linear scan
+    return {
+      for (final s in committedStrokes)
+        if (!s.isTombstone &&
+            !_erasedStrokeIds.contains(s.id) &&
+            s.points.isNotEmpty &&
+            s.boundingRect.overlaps(rect))
+          s.id,
+    };
+  }
+
+  /// Rebuild the spatial grid from current committed strokes.
+  void _rebuildSpatialGrid() {
+    if (_canvasWidth <= 0 || _canvasHeight <= 0) return;
+    _spatialGrid ??= SpatialGrid(128.0, _canvasWidth, _canvasHeight);
+    _spatialGrid!.rebuild(committedStrokes, _erasedStrokeIds);
+    _spatialGridDirty = false;
+  }
+
+  /// Incrementally update the grid for an erase operation.
+  /// Removes erased strokes and inserts new split segments without
+  /// rebuilding the entire grid. O(K) where K = strokes changed.
+  void updateGridForErase(Set<String> erasedIds, List<Stroke> newStrokes) {
+    if (_spatialGrid == null || _spatialGridDirty) return;
+    for (final id in erasedIds) {
+      _spatialGrid!.remove(id);
+    }
+    for (final s in newStrokes) {
+      if (!s.isTombstone && s.points.isNotEmpty) {
+        _spatialGrid!.insert(s.id, s.boundingRect);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Raster cache mutation tracking
   // ---------------------------------------------------------------------------
 
@@ -126,9 +176,11 @@ class DrawingService extends ChangeNotifier {
   }
 
   /// Increment version and recompute erased IDs.
+  /// Marks the spatial grid dirty — it rebuilds lazily on next query.
   void _bumpVersion() {
     _strokeVersion++;
     _recomputeErasedIds();
+    _spatialGridDirty = true;
   }
 
   void _recomputeErasedIds() {
@@ -158,6 +210,8 @@ class DrawingService extends ChangeNotifier {
     committedStrokes.addAll(strokes);
     _erasedStrokeIds.addAll(newlyErasedIds);
     _strokeVersion++;
+    // Grid updated incrementally by caller via updateGridForErase().
+    // Don't mark dirty — incremental update keeps it consistent.
     _lastMutationInfo = const MutationInfo.fullRebuild();
   }
 
@@ -379,8 +433,13 @@ class DrawingService extends ChangeNotifier {
   /// is known (first build or resize). These values are used to normalize
   /// [RenderPoint] coordinates to 0.0–1.0 at pen-up.
   void setCanvasDimensions(double width, double height) {
+    final changed = _canvasWidth != width || _canvasHeight != height;
     _canvasWidth = width;
     _canvasHeight = height;
+    if (changed) {
+      _spatialGrid = null; // Force re-creation with new dimensions
+      _spatialGridDirty = true;
+    }
   }
 
   /// Current active layer.
@@ -508,6 +567,11 @@ class DrawingService extends ChangeNotifier {
     _inflightPoints = [];
     _lastMutationInfo = MutationInfo.append(committed);
     _bumpVersion();
+    // Incremental grid insert — O(1) instead of waiting for lazy O(N) rebuild.
+    if (_spatialGrid != null && committed.points.isNotEmpty) {
+      _spatialGrid!.insert(committed.id, committed.boundingRect);
+      _spatialGridDirty = false;
+    }
     notifyListeners();
     return committed;
   }
@@ -580,6 +644,7 @@ class DrawingService extends ChangeNotifier {
     _inflightStroke = null;
     _inflightPoints = [];
     committedStrokes.clear();
+    _spatialGrid?.clear();
     _lastMutationInfo = const MutationInfo.fullRebuild();
     _bumpVersion();
     notifyListeners();
