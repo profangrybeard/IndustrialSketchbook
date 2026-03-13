@@ -38,6 +38,7 @@ import 'page_strip.dart';
 import 'tile_cache.dart';
 import 'dev_menu_page.dart';
 import 'sync_settings_page.dart';
+import 'zoom_indicator.dart';
 
 const _uuid = Uuid();
 
@@ -446,6 +447,26 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                 ),
               ),
             ),
+
+          // Zoom indicator — appears during pinch or when zoomed
+          Positioned(
+            bottom: 80,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: IgnorePointer(
+                ignoring: _camera.zoom == 1.0 && !_isPinching,
+                child: AnimatedOpacity(
+                  opacity: (_camera.zoom != 1.0 || _isPinching) ? 1.0 : 0.0,
+                  duration: const Duration(milliseconds: 200),
+                  child: ZoomIndicator(
+                    zoom: _camera.zoom,
+                    onResetTap: _resetZoom,
+                  ),
+                ),
+              ),
+            ),
+          ),
 
           // Floating palette layer (on top)
           FloatingPalette(
