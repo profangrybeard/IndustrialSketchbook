@@ -106,8 +106,8 @@ const int _maxSubdivisions = 50;
 /// Default target arc length for live drawing (maximum fidelity).
 const double _defaultTargetArcLength = 0.5;
 
-/// Coarser arc length for cached/replay rendering (6x faster, near-identical).
-const double replayTargetArcLength = 3.0;
+/// Coarser arc length for cached/replay rendering (3x faster, visually close).
+const double replayTargetArcLength = 1.5;
 
 /// Compute adaptive subdivision count based on segment chord length.
 /// Long segments (fast strokes on big tablets) get more subdivisions;

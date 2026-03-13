@@ -813,10 +813,12 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
         _lastCommittedWeight = committed.weight;
       }
 
-      // Invalidate tiles overlapping the new stroke
+      // Invalidate only tiles overlapping the new stroke; surviving tiles
+      // keep their cached images (revalidateRemaining re-stamps their version).
       if (committed.points.isNotEmpty) {
         _tileCache.invalidateRect(committed.boundingRect);
         _tileCache.bumpVersion();
+        _tileCache.revalidateRemaining();
       }
 
       // Push undo action for the drawn stroke
@@ -1016,6 +1018,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
       if (dirtyRect != Rect.zero) {
         _tileCache.invalidateRect(dirtyRect);
         _tileCache.bumpVersion();
+        _tileCache.revalidateRemaining();
         drawingService.setMutationInfo(MutationInfo.dirtyRegion(dirtyRect));
       }
       drawingService.notifyListeners();
@@ -1080,6 +1083,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     drawingService.addCommittedStrokes([tombstone]);
     _tileCache.invalidateRect(newest.boundingRect);
     _tileCache.bumpVersion();
+    _tileCache.revalidateRemaining();
     drawingService.setMutationInfo(
         MutationInfo.dirtyRegion(newest.boundingRect));
     drawingService.notifyListeners();
@@ -1118,6 +1122,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     if (dirtyRect != Rect.zero) {
       _tileCache.invalidateRect(dirtyRect);
       _tileCache.bumpVersion();
+      _tileCache.revalidateRemaining();
       drawingService.setMutationInfo(MutationInfo.dirtyRegion(dirtyRect));
     }
 
@@ -1148,6 +1153,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     if (dirtyRect != Rect.zero) {
       _tileCache.invalidateRect(dirtyRect);
       _tileCache.bumpVersion();
+      _tileCache.revalidateRemaining();
       drawingService.setMutationInfo(MutationInfo.dirtyRegion(dirtyRect));
     }
 

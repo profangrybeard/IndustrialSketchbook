@@ -49,7 +49,11 @@ class CoordinateUtils {
   /// Uses the device's logical width to compute the reference scale.
   /// The same width should be used consistently (don't change on rotation).
   static void initialize(double deviceLogicalWidth) {
-    assert(deviceLogicalWidth > 0, 'Device width must be positive');
+    if (deviceLogicalWidth <= 0 || deviceLogicalWidth.isNaN) {
+      throw ArgumentError(
+        'Device width must be positive, got $deviceLogicalWidth',
+      );
+    }
     _referenceScale = deviceLogicalWidth / referenceWidth;
     _initialized = true;
   }
@@ -57,6 +61,7 @@ class CoordinateUtils {
   /// Initialize from a [FlutterView] (typically `PlatformDispatcher.views.first`).
   ///
   /// Extracts the logical width from the view's physical size and DPR.
+  /// If the view has zero size (not yet laid out), throws.
   static void initializeFromView(FlutterView view) {
     final logicalWidth = view.physicalSize.width / view.devicePixelRatio;
     initialize(logicalWidth);

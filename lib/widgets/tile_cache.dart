@@ -38,6 +38,17 @@ class TileCache {
   /// Bump the global version (on stroke commit/erase/undo/redo).
   void bumpVersion() => _version++;
 
+  /// Re-stamp all surviving tiles with the current version.
+  ///
+  /// Call after [invalidateRect] + [bumpVersion] when only the invalidated
+  /// tiles need re-rendering. Surviving tiles are marked valid at the new
+  /// version, avoiding unnecessary re-renders.
+  void revalidateRemaining() {
+    for (final entry in _tiles.values) {
+      entry.version = _version;
+    }
+  }
+
   /// Get a cached tile image if it exists and matches the current version
   /// and resolution. Returns null if stale or missing.
   ui.Image? get(TileKey key, int pixelSize) {
@@ -123,7 +134,7 @@ class TileCache {
 /// A cached tile entry: the rasterized image plus metadata.
 class TileEntry {
   ui.Image image;
-  final int version;
+  int version;
   final int pixelSize;
 
   TileEntry(this.image, this.version, this.pixelSize);

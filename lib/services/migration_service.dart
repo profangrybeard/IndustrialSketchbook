@@ -21,7 +21,8 @@ class MigrationService {
   final Database _db;
 
   /// Number of strokes to migrate per batch.
-  static const int _batchSize = 50;
+  /// Larger batches = fewer SQLite transactions = less fsync overhead.
+  static const int _batchSize = 500;
 
   /// Run the format-0 → format-1 migration to completion.
   ///
