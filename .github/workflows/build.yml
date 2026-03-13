@@ -33,6 +33,10 @@ jobs:
           # Verify the keystore is valid
           keytool -list -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey 2>&1 | tee /dev/stderr | grep -q 'androiddebugkey' || { echo "ERROR: invalid keystore"; exit 1; }
           keytool -list -v -keystore ~/.android/debug.keystore -storepass android 2>&1 | grep 'SHA1:'
+          # Debug: show where Gradle will look for the keystore
+          echo "HOME=$HOME"
+          echo "USER=$(whoami)"
+          ls -la ~/.android/debug.keystore
         env:
           DEBUG_KEYSTORE: ${{ secrets.DEBUG_KEYSTORE }}
 
