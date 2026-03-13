@@ -29,7 +29,12 @@ jobs:
       - name: Restore debug keystore
         run: |
           mkdir -p ~/.android
-          echo "${{ secrets.DEBUG_KEYSTORE }}" | base64 -d > ~/.android/debug.keystore
+          printf '%s' "$DEBUG_KEYSTORE" | base64 -d > ~/.android/debug.keystore
+          # Verify the keystore is valid
+          keytool -list -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey 2>&1 | tee /dev/stderr | grep -q 'androiddebugkey' || { echo "ERROR: invalid keystore"; exit 1; }
+          keytool -list -v -keystore ~/.android/debug.keystore -storepass android 2>&1 | grep 'SHA1:'
+        env:
+          DEBUG_KEYSTORE: ${{ secrets.DEBUG_KEYSTORE }}
 
       - name: Inject build info
         run: |
