@@ -4,23 +4,24 @@ import 'package:flutter/material.dart';
 
 import '../models/pressure_mode.dart';
 import '../models/stroke.dart';
+import '../models/tile_key.dart';
 import '../services/drawing_service.dart' show MutationInfo, MutationType;
-import 'stroke_raster_cache.dart';
+import '../utils/spatial_grid.dart';
+import 'tile_cache.dart';
 import '../utils/perf_metrics.dart';
 import 'stroke_rendering.dart' as rendering;
 
-/// Layer 2 painter: all committed (finalized) strokes (Phase 2.8).
+/// Layer 2 painter: all committed (finalized) strokes — tiled rendering.
 ///
 /// Renders on a transparent layer — no background fill. Composites over
 /// [BackgroundPainter] via Flutter's layer tree.
 ///
-/// Uses [strokeVersion] for cache invalidation: during active drawing
-/// (pointer move), the version doesn't change, so [shouldRepaint] returns
-/// `false` and Flutter reuses the cached GPU texture.
+/// Instead of a single full-page raster cache, renders per-tile images
+/// (512×512 world units) and caches them in a [TileCache] with LRU eviction.
+/// Only tiles visible in the current viewport are rendered/blitted.
 ///
-/// Additionally maintains a [StrokeRasterCache] for incremental updates:
-/// on pen-up (single stroke append), only the new stroke is rendered on top
-/// of the cached image instead of re-rendering all N strokes.
+/// This painter lives **outside** the Flutter [Transform] widget — it handles
+/// its own world→screen mapping via [viewportRect] and [zoom].
 class CommittedStrokesPainter extends CustomPainter {
   CommittedStrokesPainter({
     required this.committedStrokes,
@@ -29,10 +30,13 @@ class CommittedStrokesPainter extends CustomPainter {
     required this.pressureMode,
     required this.grainIntensity,
     required this.pressureExponent,
-    required this.rasterCache,
+    required this.tileCache,
+    required this.spatialGrid,
     required this.devicePixelRatio,
+    required this.viewportRect,
+    required this.zoom,
     required this.lastMutationInfo,
-  }) : super(repaint: rasterCache);
+  });
 
   /// All committed strokes for the current page.
   final List<Stroke> committedStrokes;
@@ -52,11 +56,20 @@ class CommittedStrokesPainter extends CustomPainter {
   /// Power-curve exponent for pencil pressure mapping.
   final double pressureExponent;
 
-  /// Shared raster cache owned by CanvasWidget. Survives across rebuilds.
-  final StrokeRasterCache rasterCache;
+  /// Per-tile raster cache shared across paints. Owned by CanvasWidget.
+  final TileCache tileCache;
+
+  /// Spatial grid for finding strokes per tile.
+  final SpatialGrid? spatialGrid;
 
   /// Device pixel ratio for high-DPI rasterization.
   final double devicePixelRatio;
+
+  /// World-space rectangle currently visible on screen.
+  final Rect viewportRect;
+
+  /// Current zoom factor.
+  final double zoom;
 
   /// Describes the most recent mutation for cache update path selection.
   final MutationInfo lastMutationInfo;
@@ -65,90 +78,142 @@ class CommittedStrokesPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final perf = PerfMetrics.instance;
     final sw = Stopwatch()..start();
-    final paramHash =
-        Object.hash(pressureMode, grainIntensity, pressureExponent);
 
-    // 1. Cache hit — version, size, and params all match. Just blit.
-    if (rasterCache.isValid(strokeVersion, size, paramHash)) {
-      _drawCachedImage(canvas, size);
-      sw.stop();
-      perf.committedPaintUs = sw.elapsedMicroseconds;
-      perf.committedPaintType = 'hit';
-      return;
+    // Safety net: if strokeVersion changed, ensure stale tiles are purged.
+    // Fine-grained invalidateRect() handles per-mutation cases, but bulk
+    // events (loadStrokes, backfillSpines) may leave stale empty tiles.
+    if (tileCache.version != strokeVersion) {
+      tileCache.clear();
+      // Sync tile cache version to stroke version
+      while (tileCache.version < strokeVersion) {
+        tileCache.bumpVersion();
+      }
     }
 
-    // 2. Incremental update — cache is exactly 1 version behind and the
-    //    last mutation was a simple pen-up append. Draw old image + new stroke.
-    if (lastMutationInfo.type == MutationType.append &&
-        lastMutationInfo.appendedStroke != null &&
-        rasterCache.canIncrement(strokeVersion, size, paramHash)) {
-      _incrementCache(canvas, size, paramHash);
-      sw.stop();
-      perf.committedPaintUs = sw.elapsedMicroseconds;
-      perf.committedPaintType = 'incr';
-      perf.committedStrokeCount = 1;
-      perf.committedSpinePointTotal = perf.lastStrokeSpinePoints;
-      perf.committedSaveLayerCount = perf.lastStrokeChunkCount + 1;
-      return;
+    final tileSize = TileCache.tileWorldSize;
+    final pixelSize = TileCache.tilePixelSize(zoom, devicePixelRatio);
+
+    // Compute visible tile range from viewport
+    final colMin = (viewportRect.left / tileSize).floor();
+    final colMax = (viewportRect.right / tileSize).floor();
+    final rowMin = (viewportRect.top / tileSize).floor();
+    final rowMax = (viewportRect.bottom / tileSize).floor();
+
+    int tilesRendered = 0;
+    int tilesHit = 0;
+
+    for (int r = rowMin; r <= rowMax; r++) {
+      for (int c = colMin; c <= colMax; c++) {
+        final key = TileKey(c, r);
+        final tileWorld = key.worldRect(tileSize);
+
+        // Try exact cache hit (version + resolution match)
+        var img = tileCache.get(key, pixelSize);
+        if (img != null) {
+          tilesHit++;
+        } else {
+          // Render fresh tile
+          img = _renderTile(key, tileWorld, pixelSize);
+          tileCache.put(key, img, pixelSize);
+          tilesRendered++;
+        }
+
+        // Blit tile to screen position
+        final screenRect = Rect.fromLTWH(
+          (tileWorld.left - viewportRect.left) * zoom,
+          (tileWorld.top - viewportRect.top) * zoom,
+          tileSize * zoom,
+          tileSize * zoom,
+        );
+
+        canvas.drawImageRect(
+          img,
+          Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble()),
+          screenRect,
+          Paint()..filterQuality = FilterQuality.low,
+        );
+      }
     }
 
-    // 3. Dirty-region update — clear and re-render only the affected area.
-    if (lastMutationInfo.type == MutationType.dirtyRegion &&
-        lastMutationInfo.dirtyRect != null &&
-        !lastMutationInfo.dirtyRect!.isEmpty &&
-        rasterCache.canDirtyRebuild(strokeVersion, size, paramHash)) {
-      _dirtyRegionRebuild(canvas, size, paramHash);
-      return;
-    }
-
-    // 4. Full rebuild — clear, load, or first render.
-    _fullRebuildCache(canvas, size, paramHash);
     sw.stop();
     perf.committedPaintUs = sw.elapsedMicroseconds;
-    perf.committedPaintType = 'full';
+    perf.committedPaintType =
+        tilesRendered > 0 ? 'tile:$tilesRendered/$tilesHit' : 'hit';
 
-    // Count visible strokes rendered
-    int count = 0;
-    for (final stroke in committedStrokes) {
-      if (stroke.isTombstone) continue;
-      if (erasedStrokeIds.contains(stroke.id)) continue;
-      count++;
+    // Debug: log first paint after strokes load to diagnose disappearing
+    // strokes. Only logs when tiles were freshly rendered (not cache hits).
+    if (tilesRendered > 0) {
+      debugPrint('[CommittedPainter] paint: ${tilesRendered + tilesHit} tiles '
+          '(${tilesRendered} rendered, $tilesHit cached), '
+          '${committedStrokes.length} strokes, '
+          'version=$strokeVersion, '
+          'viewport=$viewportRect, zoom=$zoom, '
+          'pixelSize=$pixelSize, '
+          'spatialGrid=${spatialGrid != null ? "yes(${spatialGrid!.strokeCount})" : "null"}, '
+          '${sw.elapsedMicroseconds}µs');
     }
-    perf.committedStrokeCount = count;
   }
 
-  /// Blit the cached raster image to the canvas.
-  void _drawCachedImage(Canvas canvas, Size size) {
-    final image = rasterCache.image!;
-    canvas.drawImageRect(
-      image,
-      Rect.fromLTWH(
-          0, 0, image.width.toDouble(), image.height.toDouble()),
-      Rect.fromLTWH(0, 0, size.width, size.height),
-      Paint(),
-    );
-  }
-
-  /// Incrementally update the cache: composite old image + new stroke.
-  void _incrementCache(Canvas canvas, Size size, int paramHash) {
-    final dpr = devicePixelRatio;
+  /// Render a single tile to an image at the given pixel resolution.
+  ui.Image _renderTile(TileKey key, Rect tileWorld, int pixelSize) {
     final recorder = ui.PictureRecorder();
     final recCanvas = Canvas(recorder);
-    recCanvas.scale(dpr, dpr);
 
-    // Draw existing cached image
-    final oldImage = rasterCache.image!;
-    recCanvas.drawImageRect(
-      oldImage,
-      Rect.fromLTWH(
-          0, 0, oldImage.width.toDouble(), oldImage.height.toDouble()),
-      Rect.fromLTWH(0, 0, size.width, size.height),
-      Paint(),
-    );
+    // Scale from world coords to pixel coords
+    final scale = pixelSize / TileCache.tileWorldSize;
+    recCanvas.scale(scale, scale);
 
-    // Render only the newly appended stroke
-    final stroke = lastMutationInfo.appendedStroke!;
-    if (!stroke.isTombstone) {
+    // Translate so tile's top-left is at canvas origin
+    recCanvas.translate(-tileWorld.left, -tileWorld.top);
+
+    // Find strokes that overlap this tile
+    Set<String> candidateIds;
+    if (spatialGrid != null) {
+      candidateIds = spatialGrid!.queryRect(tileWorld);
+    } else {
+      // Fallback: all visible strokes (expensive)
+      candidateIds = {
+        for (final s in committedStrokes)
+          if (!s.isTombstone &&
+              !erasedStrokeIds.contains(s.id) &&
+              s.points.isNotEmpty &&
+              s.boundingRect.overlaps(tileWorld))
+            s.id,
+      };
+    }
+
+    // Debug: log spatial grid mismatches on first render
+    if (candidateIds.isEmpty && committedStrokes.isNotEmpty && spatialGrid != null) {
+      // Double-check with linear scan to detect spatial grid bug
+      final linearIds = {
+        for (final s in committedStrokes)
+          if (!s.isTombstone &&
+              !erasedStrokeIds.contains(s.id) &&
+              s.points.isNotEmpty &&
+              s.boundingRect.overlaps(tileWorld))
+            s.id,
+      };
+      if (linearIds.isNotEmpty) {
+        debugPrint('[CommittedPainter] SPATIAL GRID BUG: tile $key '
+            'tileWorld=$tileWorld — grid returned 0, linear scan found '
+            '${linearIds.length} strokes. Example: '
+            '${committedStrokes.firstWhere((s) => linearIds.contains(s.id)).boundingRect}');
+        // Use the linear scan results as fallback
+        candidateIds = linearIds;
+      }
+    }
+
+    // Clip to tile bounds to prevent bleeding into adjacent tiles
+    recCanvas.save();
+    recCanvas.clipRect(tileWorld);
+
+    int strokesRendered = 0;
+    for (final stroke in committedStrokes) {
+      if (!candidateIds.contains(stroke.id)) continue;
+      if (stroke.isTombstone) continue;
+      if (erasedStrokeIds.contains(stroke.id)) continue;
+      strokesRendered++;
+
       rendering.renderStroke(
         recCanvas,
         stroke,
@@ -159,124 +224,19 @@ class CommittedStrokesPainter extends CustomPainter {
       );
     }
 
-    final picture = recorder.endRecording();
-    final newImage = picture.toImageSync(
-        (size.width * dpr).ceil(), (size.height * dpr).ceil());
-    picture.dispose();
-    rasterCache.update(newImage, strokeVersion, size, paramHash);
-
-    _drawCachedImage(canvas, size);
-  }
-
-  /// Dirty-region cache update: clear and re-render only the affected area.
-  ///
-  /// Used for undo/redo/erase where only a localized area changes.
-  /// Cost: O(K) where K = strokes overlapping the dirty rect, vs O(N) for
-  /// full rebuild.
-  void _dirtyRegionRebuild(Canvas canvas, Size size, int paramHash) {
-    final dpr = devicePixelRatio;
-    final dirtyRect = lastMutationInfo.dirtyRect!;
-    final recorder = ui.PictureRecorder();
-    final recCanvas = Canvas(recorder);
-    recCanvas.scale(dpr, dpr);
-
-    // Draw existing cached image as base
-    final oldImage = rasterCache.image!;
-    recCanvas.drawImageRect(
-      oldImage,
-      Rect.fromLTWH(
-          0, 0, oldImage.width.toDouble(), oldImage.height.toDouble()),
-      Rect.fromLTWH(0, 0, size.width, size.height),
-      Paint(),
-    );
-
-    // Clear the dirty rect to transparent
-    recCanvas.drawRect(
-      dirtyRect,
-      Paint()..blendMode = BlendMode.clear,
-    );
-
-    // Clip to dirty rect and re-render only overlapping strokes.
-    // Clipping prevents alpha doubling for semi-transparent strokes
-    // that cross the dirty region boundary.
-    recCanvas.save();
-    recCanvas.clipRect(dirtyRect);
-    for (final stroke in committedStrokes) {
-      if (stroke.isTombstone) continue;
-      if (erasedStrokeIds.contains(stroke.id)) continue;
-      if (!stroke.boundingRect.overlaps(dirtyRect)) continue;
-      rendering.renderStroke(
-        recCanvas,
-        stroke,
-        pressureMode: pressureMode,
-        grainIntensity: grainIntensity,
-        pressureExponent: pressureExponent,
-      );
-    }
     recCanvas.restore();
 
     final picture = recorder.endRecording();
-    final newImage = picture.toImageSync(
-        (size.width * dpr).ceil(), (size.height * dpr).ceil());
+    final image = picture.toImageSync(pixelSize, pixelSize);
     picture.dispose();
-    rasterCache.update(newImage, strokeVersion, size, paramHash);
-
-    _drawCachedImage(canvas, size);
-  }
-
-  /// Full cache rebuild: render strokes directly, then build cache async.
-  ///
-  /// Instead of blocking the UI thread with toImageSync(), we:
-  /// 1. Record strokes to a Picture (fast display-list build)
-  /// 2. Draw the Picture to the canvas immediately (non-blocking)
-  /// 3. Call picture.toImage() asynchronously (GPU rasterization off UI thread)
-  /// 4. When the image is ready, update rasterCache -> notifyListeners -> repaint
-  void _fullRebuildCache(Canvas canvas, Size size, int paramHash) {
-    final dpr = devicePixelRatio;
-    final recorder = ui.PictureRecorder();
-    final recCanvas = Canvas(recorder);
-    recCanvas.scale(dpr, dpr);
-
-    for (final stroke in committedStrokes) {
-      if (stroke.isTombstone) continue;
-      if (erasedStrokeIds.contains(stroke.id)) continue;
-      rendering.renderStroke(
-        recCanvas,
-        stroke,
-        pressureMode: pressureMode,
-        grainIntensity: grainIntensity,
-        pressureExponent: pressureExponent,
-        targetArcLength: rendering.replayTargetArcLength,
-      );
-    }
-
-    final picture = recorder.endRecording();
-
-    // Draw picture to canvas immediately (undo DPR since canvas is logical)
-    canvas.save();
-    canvas.scale(1.0 / dpr, 1.0 / dpr);
-    canvas.drawPicture(picture);
-    canvas.restore();
-
-    // Async cache build - GPU rasterization happens off the UI thread
-    final gen = rasterCache.buildGeneration;
-    final version = strokeVersion;
-    final w = (size.width * dpr).ceil();
-    final h = (size.height * dpr).ceil();
-
-    picture.toImage(w, h).then((image) {
-      picture.dispose();
-      if (gen != rasterCache.buildGeneration) {
-        image.dispose();
-        return;
-      }
-      rasterCache.update(image, version, size, paramHash);
-    });
+    return image;
   }
 
   @override
   bool shouldRepaint(covariant CommittedStrokesPainter oldDelegate) {
     return strokeVersion != oldDelegate.strokeVersion ||
+        viewportRect != oldDelegate.viewportRect ||
+        zoom != oldDelegate.zoom ||
         pressureMode != oldDelegate.pressureMode ||
         grainIntensity != oldDelegate.grainIntensity ||
         pressureExponent != oldDelegate.pressureExponent;

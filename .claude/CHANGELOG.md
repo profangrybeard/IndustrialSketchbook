@@ -8,6 +8,74 @@
 
 ---
 
+## Option D Phase 2 — Tiled Rendering + Infinite Canvas
+**Date:** 2026-03-13 | **Tests:** 405 pass | **Branch:** `claude/stoic-leavitt`
+
+### Problem
+The canvas was fixed-size with zoom capped at 1.5x and pan clamped to canvas bounds. Deep zoom for fine detail work was impossible. The single full-page raster cache didn't scale — at high zoom, the entire canvas would need to be rasterized at absurd resolutions. And the spatial grid was bounded to canvas dimensions, preventing strokes at negative or very large coordinates.
+
+### Solution
+Four-phase infinite canvas overhaul: Camera system → Unbounded spatial grid → Tiled rendering → Viewport-aware background.
+
+### What changed
+
+**1. Camera model (`lib/models/camera.dart` — NEW)**
+- `topLeft` (Offset) + `zoom` (double) replaces `_canvasScale` / `_canvasOffset`
+- `screenToWorld()` / `worldToScreen()` / `viewportRect()` / `matrix` for Transform widget
+- Zoom range: 0.05x–20.0x. Pan: infinite (no clamping)
+- Focal-point-stable pinch: the world point under your pinch stays stationary during zoom
+
+**2. Tiled rendering (`lib/widgets/tile_cache.dart` — NEW)**
+- 512×512 world-unit tiles, rasterized to GPU images at resolution matching current zoom
+- LRU eviction (max 64 tiles), physical pixel cap of 2048px per tile (prevents GPU memory blowout)
+- `invalidateRect(worldRect)` for fine-grained per-mutation invalidation
+- Version tracking synced with `strokeVersion` — stale tiles from pre-load paints are automatically purged
+
+**3. Committed strokes painter — complete rewrite**
+- Computes visible tile range from camera viewport
+- For each tile: check cache → if miss, query spatial grid → render strokes → `toImageSync()` → cache
+- World→screen positioning: `screenRect = (tileWorld.left - viewport.left) * zoom`
+
+**4. Frozen pinch rendering — zero tile re-renders during zoom gesture**
+- `_renderCamera` freezes at pinch start; tiles stay cached throughout the gesture
+- Compensating Transform wraps background + committed layers: `scale(currentZoom/frozenZoom)` + translate
+- On pinch end: `_tileCache.clear()` → tiles re-render at new resolution (one-time cost)
+
+**5. Listener moved outside Transform**
+- When zoomed out, visible world extends beyond original screen bounds
+- Old: Listener inside Transform → hit area limited to screen-sized rect in world space
+- New: Listener outside Transform → captures full screen → `_camera.screenToWorld()` for all coordinates
+
+**6. Background LOD (`lib/widgets/background_painter.dart`)**
+- Renders only grid dots/lines within camera viewport (not infinite canvas)
+- At >4x zoom: grid subdivides (spacing/2). At <0.5x: grid coarsens (spacing×2)
+- Dot radius and line width scale with zoom (clamped)
+
+### Critical bugs found and fixed during device testing
+
+| Bug | Root cause | Fix |
+|-----|-----------|-----|
+| Strokes disappear after load | Empty tiles cached at version=0 before strokes load, returned as cache hits after | `_tileCache.clear()` after `loadStrokes()` + version sync safety net in painter |
+| Pinch-to-zoom crawls | Every frame: new zoom → new pixelSize → all tiles miss → synchronous `toImageSync()` | Freeze `_renderCamera` during pinch, compensating Transform for visual zoom |
+| Can't draw at zoomed-out edges | Listener inside Transform → hit area bounded to original screen rect in world coords | Move Listener outside Transform, explicit `screenToWorld()` conversion |
+
+### Files
+| File | Change |
+|------|--------|
+| `lib/models/camera.dart` | **NEW** — Camera model |
+| `lib/models/tile_key.dart` | **NEW** — Tile grid identifier |
+| `lib/widgets/tile_cache.dart` | **NEW** — Per-tile LRU raster cache |
+| `lib/utils/spatial_grid.dart` | Unbounded hash-based cell keys (Cantor pairing) |
+| `lib/services/drawing_service.dart` | Lazy spatial grid getter |
+| `lib/widgets/canvas_widget.dart` | Camera, tiled rendering, frozen pinch, Listener refactor |
+| `lib/widgets/committed_strokes_painter.dart` | Tiled rendering with version-synced cache |
+| `lib/widgets/background_painter.dart` | Viewport-aware grid with LOD |
+| `test/utils/spatial_grid_test.dart` | Updated for unbounded grid |
+| `test/widgets/background_painter_test.dart` | Added viewport/zoom params |
+| `test/widgets/committed_strokes_painter_test.dart` | Updated for TileCache |
+
+---
+
 ## Performance Option A — Pre-Baked Spine Points
 **Date:** 2026-03-13 | **Tests:** 383 pass | **Base:** rebased on `main`
 
