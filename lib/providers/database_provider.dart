@@ -6,6 +6,7 @@ import '../models/chapter.dart';
 import '../models/notebook.dart';
 import '../models/sketch_page.dart';
 import '../services/database_service.dart';
+import '../services/migration_service.dart';
 
 /// Default entity IDs used for the Phase 2 single-page canvas.
 const defaultNotebookId = 'default-notebook';
@@ -35,6 +36,11 @@ final databaseServiceProvider = FutureProvider<DatabaseService>((ref) async {
 
   // Seed default notebook → chapter → page if they don't exist yet
   await _seedDefaults(db);
+
+  // Migrate legacy world-coordinate strokes to reference units (Option B).
+  // Runs in batches, non-blocking for typical notebooks (<100ms total).
+  final migration = MigrationService(db.db);
+  await migration.migrateToReferenceUnits();
 
   // Clean up on dispose
   ref.onDispose(() => db.close());

@@ -8,6 +8,7 @@ import '../models/chapter.dart';
 import '../models/notebook.dart';
 import '../models/sketch_page.dart';
 import '../models/stroke.dart';
+import '../utils/coordinate_utils.dart';
 
 /// SQLite database service (TDD §2, Appendix A).
 ///
@@ -20,6 +21,13 @@ import '../models/stroke.dart';
 /// See TDD Appendix A for the complete table definitions.
 class DatabaseService {
   Database? _db;
+
+  /// Reference scale for coordinate conversion.
+  ///
+  /// When set (via [CoordinateUtils.initialize]), all stroke reads/writes
+  /// convert between reference units (DB) and world coordinates (in-memory).
+  double? get _referenceScale =>
+      CoordinateUtils.isInitialized ? CoordinateUtils.referenceScale : null;
 
   /// The active database instance. Throws if not initialized.
   Database get db {
@@ -42,7 +50,7 @@ class DatabaseService {
 
     _db = await openDatabase(
       dbPath,
-      version: 5,
+      version: 6,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
       onConfigure: (db) async {
@@ -103,6 +111,7 @@ class DatabaseService {
 
     // The event log — source of truth (TDD §2)
     // v4: raw_points_blob (archive) + render_points_blob (compact normalized)
+    // v6: coord_format (0 = legacy world coords, 1 = reference units)
     batch.execute('''
       CREATE TABLE strokes (
         id TEXT PRIMARY KEY,
@@ -115,6 +124,7 @@ class DatabaseService {
         raw_points_blob BLOB NOT NULL,
         render_points_blob BLOB,
         spine_blob BLOB,
+        coord_format INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         is_tombstone INTEGER NOT NULL DEFAULT 0,
         erases_stroke_id TEXT,
@@ -256,6 +266,10 @@ class DatabaseService {
     }
     if (oldVersion < 5) {
       await db.execute('ALTER TABLE strokes ADD COLUMN spine_blob BLOB');
+    }
+    if (oldVersion < 6) {
+      await db.execute(
+          'ALTER TABLE strokes ADD COLUMN coord_format INTEGER NOT NULL DEFAULT 0');
     }
   }
 
@@ -555,8 +569,8 @@ class DatabaseService {
   /// Target latency: < 5ms (WAL mode, async isolate write).
   Future<void> insertStroke(Stroke stroke) async {
     await db.transaction((txn) async {
-      // Insert the stroke record
-      await txn.insert('strokes', stroke.toDbMap(),
+      // Insert the stroke record (converted to reference units if scale available)
+      await txn.insert('strokes', stroke.toDbMap(referenceScale: _referenceScale),
           conflictAlgorithm: ConflictAlgorithm.ignore);
 
       // Get the next sort_order for this page
@@ -585,8 +599,9 @@ class DatabaseService {
       // Query MAX(sort_order) once per page instead of once per stroke (N+1 fix).
       final Map<String, int> nextOrder = {};
 
+      final scale = _referenceScale;
       for (final stroke in strokes) {
-        await txn.insert('strokes', stroke.toDbMap(),
+        await txn.insert('strokes', stroke.toDbMap(referenceScale: scale),
             conflictAlgorithm: ConflictAlgorithm.ignore);
 
         if (!nextOrder.containsKey(stroke.pageId)) {
@@ -619,14 +634,15 @@ class DatabaseService {
       WHERE pso.page_id = ?
       ORDER BY pso.sort_order ASC
     ''', [pageId]);
-    return rows.map(Stroke.fromDbMap).toList();
+    final scale = _referenceScale;
+    return rows.map((r) => Stroke.fromDbMap(r, referenceScale: scale)).toList();
   }
 
   /// Get a single stroke by ID.
   Future<Stroke?> getStroke(String id) async {
     final rows = await db.query('strokes', where: 'id = ?', whereArgs: [id]);
     if (rows.isEmpty) return null;
-    return Stroke.fromDbMap(rows.first);
+    return Stroke.fromDbMap(rows.first, referenceScale: _referenceScale);
   }
 
   /// Get the ordered stroke IDs for a page (for VER-001 test).
@@ -712,6 +728,10 @@ class DatabaseService {
   /// Get all strokes that haven't been synced yet (synced = 0).
   ///
   /// Returns both regular strokes and tombstones — both need uploading.
+  /// Get all strokes that haven't been synced yet (synced = 0).
+  ///
+  /// Returns strokes in their DB format (reference units for format-1).
+  /// No denormalization — sync push sends reference-unit values directly.
   Future<List<Stroke>> getUnsyncedStrokes() async {
     final maps = await db.query(
       'strokes',
@@ -719,7 +739,8 @@ class DatabaseService {
       whereArgs: [0],
       orderBy: 'created_at ASC',
     );
-    return maps.map(Stroke.fromDbMap).toList();
+    // No referenceScale — return raw DB values for sync export
+    return maps.map((m) => Stroke.fromDbMap(m)).toList();
   }
 
   /// Batch-mark strokes as synced after successful upload.
@@ -761,7 +782,7 @@ class DatabaseService {
 
     // Insert stroke and page_stroke_order in a transaction
     await db.transaction((txn) async {
-      await txn.insert('strokes', stroke.toDbMap(),
+      await txn.insert('strokes', stroke.toDbMap(referenceScale: _referenceScale),
           conflictAlgorithm: ConflictAlgorithm.ignore);
 
       // Only add to page_stroke_order if not a tombstone

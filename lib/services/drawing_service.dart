@@ -7,13 +7,11 @@ import '../models/eraser_mode.dart';
 import '../models/pencil_lead.dart';
 import '../models/pressure_curve.dart';
 import '../models/pressure_mode.dart';
-import '../models/render_point.dart';
 import '../models/spine_point.dart';
 import '../models/stroke.dart';
 import '../models/stroke_point.dart';
 import '../models/tool_type.dart';
 import '../models/undo_action.dart';
-import '../utils/curve_fitter.dart';
 import '../utils/spatial_grid.dart';
 import '../widgets/stroke_rendering.dart' show computeSpinePoints;
 import 'database_service.dart';
@@ -423,26 +421,6 @@ class DrawingService extends ChangeNotifier {
     notifyListeners();
   }
 
-  // ---------------------------------------------------------------------------
-  // Canvas dimensions (Phase 2: coordinate normalization)
-  // ---------------------------------------------------------------------------
-
-  /// Canvas width in device pixels. Set by CanvasWidget on layout.
-  double _canvasWidth = 0.0;
-  double get canvasWidth => _canvasWidth;
-
-  /// Canvas height in device pixels. Set by CanvasWidget on layout.
-  double _canvasHeight = 0.0;
-  double get canvasHeight => _canvasHeight;
-
-  /// Update canvas dimensions. Called by CanvasWidget when the canvas size
-  /// is known (first build or resize). These values are used to normalize
-  /// [RenderPoint] coordinates to 0.0–1.0 at pen-up.
-  void setCanvasDimensions(double width, double height) {
-    _canvasWidth = width;
-    _canvasHeight = height;
-  }
-
   /// Current active layer.
   String currentLayerId = 'default';
 
@@ -525,17 +503,6 @@ class DrawingService extends ChangeNotifier {
     // is not affected if _inflightPoints is reused.
     final frozenPoints = List<StrokePoint>.of(_inflightPoints);
 
-    // Phase 2: curve fit → normalize to 0.0–1.0 using canvas dimensions.
-    // RenderData stores compact, device-independent coordinates for sync.
-    final fittedSp = CurveFitter.chaikinSmooth(
-      CurveFitter.simplify(frozenPoints),
-    );
-
-    // Normalize to 0.0–1.0 if canvas dimensions are known, otherwise
-    // store device coordinates as fallback (canvas dims should always
-    // be set by CanvasWidget before any drawing occurs).
-    final hasCanvasDims = _canvasWidth > 0 && _canvasHeight > 0;
-
     // Pre-bake spine points at replay arc length for fast page-load rendering.
     // This is the Option A performance fix — compute once, skip subdivision
     // on every subsequent page load.
@@ -552,13 +519,6 @@ class DrawingService extends ChangeNotifier {
       weight: stroke.weight,
       opacity: stroke.opacity,
       points: frozenPoints,
-      renderData: fittedSp
-          .map((sp) => hasCanvasDims
-              ? RenderPoint.fromStrokePoint(sp,
-                  canvasWidth: _canvasWidth, canvasHeight: _canvasHeight)
-              : RenderPoint(
-                  x: sp.x, y: sp.y, pressure: sp.pressure))
-          .toList(),
       spineData: spineData,
       createdAt: DateTime.now().toUtc(),
     );

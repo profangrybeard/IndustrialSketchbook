@@ -1,12 +1,21 @@
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'providers/auth_provider.dart';
 import 'providers/database_provider.dart';
+import 'utils/coordinate_utils.dart';
 import 'widgets/canvas_widget.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize coordinate system before any DB reads.
+  // Uses the primary view's logical width as the reference device width.
+  final view = PlatformDispatcher.instance.views.first;
+  CoordinateUtils.initializeFromView(view);
+
   runApp(const ProviderScope(child: IndustrialSketchbookApp()));
 }
 

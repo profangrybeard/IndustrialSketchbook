@@ -76,6 +76,18 @@ class Stroke {
   /// Set to true after cloud acknowledgement.
   final bool synced;
 
+  /// Coordinate format: 0 = legacy world coordinates, 1 = reference units.
+  ///
+  /// Strokes in format 1 have their x,y positions and weight stored in
+  /// device-independent reference units (1000.0 = one screen width).
+  /// At DB load time, format-1 values are multiplied by [referenceScale]
+  /// to recover world coordinates. At DB save time, world coordinates
+  /// are divided by [referenceScale] to produce reference units.
+  ///
+  /// In-memory Stroke objects always hold world coordinates — coordFormat
+  /// only affects serialization.
+  final int coordFormat;
+
   Stroke({
     required this.id,
     required this.pageId,
@@ -91,6 +103,7 @@ class Stroke {
     this.isTombstone = false,
     this.erasesStrokeId,
     this.synced = false,
+    this.coordFormat = 0,
   });
 
   /// The bounding rectangle of all points, inflated by weight/2 on all sides.
@@ -238,7 +251,15 @@ class Stroke {
       );
 
   /// Convert to a SQLite row map. Points are stored as binary blobs.
-  Map<String, dynamic> toDbMap() => {
+  ///
+  /// When [referenceScale] is provided, coordinates and weight are divided
+  /// by the scale to produce device-independent reference units (coord_format=1).
+  /// When null, coordinates are stored as-is (legacy world coords, coord_format=0).
+  Map<String, dynamic> toDbMap({double? referenceScale}) {
+    // If stroke is already in reference units (e.g., from v3 sync pull),
+    // store as-is without conversion.
+    if (coordFormat == 1) {
+      return {
         'id': id,
         'page_id': pageId,
         'layer_id': layerId,
@@ -247,37 +268,141 @@ class Stroke {
         'weight': weight,
         'opacity': opacity,
         'raw_points_blob': StrokePoint.packAll(points),
-        'render_points_blob':
-            renderData != null ? RenderPoint.packAll(renderData!) : null,
+        'render_points_blob': null,
         'spine_blob':
             spineData != null ? SpinePoint.packAll(spineData!) : null,
+        'coord_format': 1,
         'created_at': createdAt.toUtc().toIso8601String(),
         'is_tombstone': isTombstone ? 1 : 0,
         'erases_stroke_id': erasesStrokeId,
         'synced': synced ? 1 : 0,
       };
+    }
+    // Convert world coords → reference units if scale provided.
+    if (referenceScale != null) {
+      final invScale = 1.0 / referenceScale;
+      return {
+        'id': id,
+        'page_id': pageId,
+        'layer_id': layerId,
+        'tool': tool.toJson(),
+        'color': color,
+        'weight': weight * invScale,
+        'opacity': opacity,
+        'raw_points_blob': _packScaledPoints(points, invScale),
+        'render_points_blob': null,
+        'spine_blob': spineData != null
+            ? _packScaledSpines(spineData!, invScale)
+            : null,
+        'coord_format': 1,
+        'created_at': createdAt.toUtc().toIso8601String(),
+        'is_tombstone': isTombstone ? 1 : 0,
+        'erases_stroke_id': erasesStrokeId,
+        'synced': synced ? 1 : 0,
+      };
+    }
+    // Legacy: store world coords as-is.
+    return {
+      'id': id,
+      'page_id': pageId,
+      'layer_id': layerId,
+      'tool': tool.toJson(),
+      'color': color,
+      'weight': weight,
+      'opacity': opacity,
+      'raw_points_blob': StrokePoint.packAll(points),
+      'render_points_blob':
+          renderData != null ? RenderPoint.packAll(renderData!) : null,
+      'spine_blob':
+          spineData != null ? SpinePoint.packAll(spineData!) : null,
+      'coord_format': 0,
+      'created_at': createdAt.toUtc().toIso8601String(),
+      'is_tombstone': isTombstone ? 1 : 0,
+      'erases_stroke_id': erasesStrokeId,
+      'synced': synced ? 1 : 0,
+    };
+  }
+
+  /// Pack points with x,y scaled by [invScale] (1/referenceScale).
+  static Uint8List _packScaledPoints(List<StrokePoint> points, double invScale) {
+    final scaled = points.map((p) => StrokePoint(
+      x: p.x * invScale,
+      y: p.y * invScale,
+      pressure: p.pressure,
+      tiltX: p.tiltX,
+      tiltY: p.tiltY,
+      twist: p.twist,
+      timestamp: p.timestamp,
+    )).toList();
+    return StrokePoint.packAll(scaled);
+  }
+
+  /// Pack spine points with x,y scaled by [invScale] (1/referenceScale).
+  static Uint8List _packScaledSpines(List<SpinePoint> spines, double invScale) {
+    final scaled = spines.map((s) => SpinePoint(
+      s.x * invScale,
+      s.y * invScale,
+      s.pressure,
+    )).toList();
+    return SpinePoint.packAll(scaled);
+  }
 
   /// Reconstruct from a SQLite row map.
-  factory Stroke.fromDbMap(Map<String, dynamic> map) => Stroke(
-        id: map['id'] as String,
-        pageId: map['page_id'] as String,
-        layerId: map['layer_id'] as String? ?? 'default',
-        tool: ToolType.fromJson(map['tool'] as String),
-        color: map['color'] as int,
-        weight: (map['weight'] as num).toDouble(),
-        opacity: (map['opacity'] as num).toDouble(),
-        points: StrokePoint.unpackAll(map['raw_points_blob'] as Uint8List),
-        renderData: map['render_points_blob'] != null
-            ? RenderPoint.unpackAll(map['render_points_blob'] as Uint8List)
-            : null,
-        spineData: map['spine_blob'] != null
-            ? SpinePoint.unpackAll(map['spine_blob'] as Uint8List)
-            : null,
-        createdAt: DateTime.parse(map['created_at'] as String),
-        isTombstone: (map['is_tombstone'] as int) == 1,
-        erasesStrokeId: map['erases_stroke_id'] as String?,
-        synced: (map['synced'] as int) == 1,
-      );
+  ///
+  /// When [referenceScale] is provided and the row has `coord_format = 1`,
+  /// coordinates and weight are multiplied by [referenceScale] to recover
+  /// world coordinates. Format-0 rows pass through unchanged.
+  factory Stroke.fromDbMap(Map<String, dynamic> map, {double? referenceScale}) {
+    final format = (map['coord_format'] as int?) ?? 0;
+    final scale = (format == 1 && referenceScale != null) ? referenceScale : null;
+
+    var rawPoints = StrokePoint.unpackAll(map['raw_points_blob'] as Uint8List);
+    var weight = (map['weight'] as num).toDouble();
+    List<SpinePoint>? spines;
+    if (map['spine_blob'] != null) {
+      spines = SpinePoint.unpackAll(map['spine_blob'] as Uint8List);
+    }
+
+    if (scale != null) {
+      rawPoints = rawPoints.map((p) => StrokePoint(
+        x: p.x * scale,
+        y: p.y * scale,
+        pressure: p.pressure,
+        tiltX: p.tiltX,
+        tiltY: p.tiltY,
+        twist: p.twist,
+        timestamp: p.timestamp,
+      )).toList();
+      weight *= scale;
+      if (spines != null) {
+        spines = spines.map((s) => SpinePoint(
+          s.x * scale,
+          s.y * scale,
+          s.pressure,
+        )).toList();
+      }
+    }
+
+    return Stroke(
+      id: map['id'] as String,
+      pageId: map['page_id'] as String,
+      layerId: map['layer_id'] as String? ?? 'default',
+      tool: ToolType.fromJson(map['tool'] as String),
+      color: map['color'] as int,
+      weight: weight,
+      opacity: (map['opacity'] as num).toDouble(),
+      points: rawPoints,
+      renderData: map['render_points_blob'] != null
+          ? RenderPoint.unpackAll(map['render_points_blob'] as Uint8List)
+          : null,
+      spineData: spines,
+      coordFormat: format,
+      createdAt: DateTime.parse(map['created_at'] as String),
+      isTombstone: (map['is_tombstone'] as int) == 1,
+      erasesStrokeId: map['erases_stroke_id'] as String?,
+      synced: (map['synced'] as int) == 1,
+    );
+  }
 
   @override
   bool operator ==(Object other) =>
