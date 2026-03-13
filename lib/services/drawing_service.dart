@@ -119,6 +119,13 @@ class DrawingService extends ChangeNotifier {
   SpatialGrid? _spatialGrid;
   bool _spatialGridDirty = true;
 
+  /// Expose the spatial grid for tiled rendering (CommittedStrokesPainter
+  /// needs it to find strokes per tile). May be null before first query.
+  SpatialGrid? get spatialGrid {
+    if (_spatialGridDirty) _rebuildSpatialGrid();
+    return _spatialGrid;
+  }
+
   /// Query strokes whose bounding rects overlap [rect].
   /// Lazily rebuilds the grid if marked dirty. Falls back to linear scan
   /// if canvas dimensions aren't set yet.
@@ -138,8 +145,7 @@ class DrawingService extends ChangeNotifier {
 
   /// Rebuild the spatial grid from current committed strokes.
   void _rebuildSpatialGrid() {
-    if (_canvasWidth <= 0 || _canvasHeight <= 0) return;
-    _spatialGrid ??= SpatialGrid(128.0, _canvasWidth, _canvasHeight);
+    _spatialGrid ??= SpatialGrid(128.0);
     _spatialGrid!.rebuild(committedStrokes, _erasedStrokeIds);
     _spatialGridDirty = false;
   }
@@ -433,13 +439,8 @@ class DrawingService extends ChangeNotifier {
   /// is known (first build or resize). These values are used to normalize
   /// [RenderPoint] coordinates to 0.0–1.0 at pen-up.
   void setCanvasDimensions(double width, double height) {
-    final changed = _canvasWidth != width || _canvasHeight != height;
     _canvasWidth = width;
     _canvasHeight = height;
-    if (changed) {
-      _spatialGrid = null; // Force re-creation with new dimensions
-      _spatialGridDirty = true;
-    }
   }
 
   /// Current active layer.

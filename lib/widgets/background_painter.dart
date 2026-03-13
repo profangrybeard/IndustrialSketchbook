@@ -1,35 +1,43 @@
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 
 import '../models/grid_style.dart';
 import 'stroke_rendering.dart' as rendering;
 
-/// Layer 1 painter: paper background + grid overlay (Phase 2.8).
+/// Layer 1 painter: paper background + infinite grid overlay.
 ///
-/// Separated from [SketchPainter] so that [RepaintBoundary] caching prevents
-/// the grid (1600+ dots at default spacing) from being redrawn on every
-/// pointer move. Only repaints when paper color, grid style, or spacing change.
+/// Renders only the grid visible within [viewportRect] (world coordinates).
+/// Lives **outside** the Flutter Transform — handles its own world→screen
+/// mapping using [viewportRect] and [zoom].
+///
+/// LOD: At high zoom (>4x) grid subdivisions appear; at low zoom (<0.5x)
+/// every other line/dot is skipped to prevent visual noise.
 class BackgroundPainter extends CustomPainter {
   BackgroundPainter({
     required this.paperColor,
     required this.gridStyle,
     required this.gridSpacing,
+    required this.viewportRect,
+    required this.zoom,
   });
 
   /// Default paper background color.
-  static const defaultPaperColor = Color(0xFFF5F5F0); // warm white / light cream
+  static const defaultPaperColor = Color(0xFFF5F5F0);
 
-  /// Paper background color.
   final Color paperColor;
-
-  /// Which grid style to draw (dots, lines, or none).
   final GridStyle gridStyle;
-
-  /// Grid spacing in logical pixels.
   final double gridSpacing;
+
+  /// World-space rectangle currently visible on screen.
+  final Rect viewportRect;
+
+  /// Current zoom factor.
+  final double zoom;
 
   @override
   void paint(Canvas canvas, Size size) {
-    // Paper background — always the chosen color regardless of theme
+    // Paper background fills the entire screen
     canvas.drawRect(
       Offset.zero & size,
       Paint()
@@ -37,48 +45,77 @@ class BackgroundPainter extends CustomPainter {
         ..style = PaintingStyle.fill,
     );
 
-    // No overlay if grid is disabled or spacing is invalid
     if (gridStyle == GridStyle.none || gridSpacing <= 0) return;
+
+    // LOD: adjust effective spacing based on zoom
+    double effectiveSpacing = gridSpacing;
+    if (zoom > 4.0) {
+      effectiveSpacing = gridSpacing / 2;
+    } else if (zoom < 0.5) {
+      effectiveSpacing = gridSpacing * 2;
+    }
 
     switch (gridStyle) {
       case GridStyle.dots:
-        _drawDots(canvas, size);
+        _drawDots(canvas, size, effectiveSpacing);
       case GridStyle.lines:
-        _drawLines(canvas, size);
+        _drawLines(canvas, size, effectiveSpacing);
       case GridStyle.none:
         break;
     }
   }
 
-  /// Draw evenly spaced dots at grid intersections.
-  void _drawDots(Canvas canvas, Size size) {
+  /// Convert world point to screen point.
+  Offset _worldToScreen(double wx, double wy) => Offset(
+        (wx - viewportRect.left) * zoom,
+        (wy - viewportRect.top) * zoom,
+      );
+
+  void _drawDots(Canvas canvas, Size size, double spacing) {
     final dotPaint = Paint()
       ..color = rendering.gridColorForBackground(paperColor)
       ..style = PaintingStyle.fill
       ..isAntiAlias = true;
 
-    const dotRadius = 1.2;
+    // Dot radius scales with zoom for visual consistency
+    final dotRadius = (1.2 * zoom).clamp(0.5, 3.0);
 
-    for (double x = gridSpacing; x < size.width; x += gridSpacing) {
-      for (double y = gridSpacing; y < size.height; y += gridSpacing) {
-        canvas.drawCircle(Offset(x, y), dotRadius, dotPaint);
+    // Start from the first grid line visible in the viewport
+    final startX =
+        (viewportRect.left / spacing).floor() * spacing;
+    final startY =
+        (viewportRect.top / spacing).floor() * spacing;
+
+    for (double wx = startX; wx <= viewportRect.right; wx += spacing) {
+      for (double wy = startY; wy <= viewportRect.bottom; wy += spacing) {
+        final screen = _worldToScreen(wx, wy);
+        canvas.drawCircle(screen, dotRadius, dotPaint);
       }
     }
   }
 
-  /// Draw full ruled grid lines at regular intervals.
-  void _drawLines(Canvas canvas, Size size) {
+  void _drawLines(Canvas canvas, Size size, double spacing) {
     final linePaint = Paint()
       ..color = rendering.gridColorForBackground(paperColor)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 0.6
+      ..strokeWidth = (0.6 * zoom).clamp(0.3, 2.0)
       ..isAntiAlias = true;
 
-    for (double x = gridSpacing; x < size.width; x += gridSpacing) {
-      canvas.drawLine(Offset(x, 0), Offset(x, size.height), linePaint);
+    final startX =
+        (viewportRect.left / spacing).floor() * spacing;
+    final startY =
+        (viewportRect.top / spacing).floor() * spacing;
+
+    // Vertical lines
+    for (double wx = startX; wx <= viewportRect.right; wx += spacing) {
+      final sx = (wx - viewportRect.left) * zoom;
+      canvas.drawLine(Offset(sx, 0), Offset(sx, size.height), linePaint);
     }
-    for (double y = gridSpacing; y < size.height; y += gridSpacing) {
-      canvas.drawLine(Offset(0, y), Offset(size.width, y), linePaint);
+
+    // Horizontal lines
+    for (double wy = startY; wy <= viewportRect.bottom; wy += spacing) {
+      final sy = (wy - viewportRect.top) * zoom;
+      canvas.drawLine(Offset(0, sy), Offset(size.width, sy), linePaint);
     }
   }
 
@@ -86,6 +123,8 @@ class BackgroundPainter extends CustomPainter {
   bool shouldRepaint(covariant BackgroundPainter oldDelegate) {
     return paperColor != oldDelegate.paperColor ||
         gridStyle != oldDelegate.gridStyle ||
-        gridSpacing != oldDelegate.gridSpacing;
+        gridSpacing != oldDelegate.gridSpacing ||
+        viewportRect != oldDelegate.viewportRect ||
+        zoom != oldDelegate.zoom;
   }
 }

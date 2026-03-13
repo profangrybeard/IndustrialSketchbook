@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
+import '../models/camera.dart';
 import '../models/chapter.dart';
 import '../models/eraser_mode.dart';
 import '../models/render_point.dart';
@@ -35,8 +36,7 @@ import 'developer_overlay.dart';
 import 'floating_palette.dart';
 import 'organize_panel.dart';
 import 'page_strip.dart';
-import 'raster_cache_pool.dart';
-import 'stroke_raster_cache.dart';
+import 'tile_cache.dart';
 import 'dev_menu_page.dart';
 import 'sync_settings_page.dart';
 
@@ -61,12 +61,8 @@ class CanvasWidget extends ConsumerStatefulWidget {
 
 class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     with WidgetsBindingObserver {
-  /// LRU pool of raster caches for recently visited pages.
-  final _rasterCachePool = RasterCachePool(maxEntries: 3);
-
-  /// Active page's raster cache (from the pool).
-  StrokeRasterCache get _strokeRasterCache =>
-      _rasterCachePool.getOrCreate(_pageId);
+  /// Per-tile raster cache for tiled rendering.
+  final _tileCache = TileCache(maxTiles: 64);
 
   /// Whether a stylus/pen is currently active (for palm rejection).
   bool _penActive = false;
@@ -112,26 +108,26 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
   Offset? _lastErasePosition;
 
   // ---------------------------------------------------------------------------
-  // Pinch-to-zoom state
+  // Camera state (infinite canvas)
   // ---------------------------------------------------------------------------
 
-  /// Current canvas scale (1.0 = default, max 1.5).
-  double _canvasScale = 1.0;
+  /// Camera: defines which part of the infinite world is visible.
+  final Camera _camera = Camera();
 
-  /// Canvas pan offset (in screen coordinates).
-  Offset _canvasOffset = Offset.zero;
+  /// Camera state used for tile/background rendering. Matches [_camera]
+  /// except during a pinch gesture, where it stays frozen at the pre-pinch
+  /// state. A compensating Transform handles the visual scaling/panning
+  /// so tiles are NOT re-rendered every frame during pinch.
+  Camera _renderCamera = Camera();
 
-  /// Scale at the start of the current pinch gesture.
-  double _baseScale = 1.0;
+  /// Snapshot of camera at pinch start (for focal-point-stable zoom).
+  Camera? _baseCameraSnapshot;
 
-  /// Offset at the start of the current pinch gesture.
-  Offset _baseOffset = Offset.zero;
+  /// Whether a pinch gesture is in progress (for frozen tile rendering).
+  bool _isPinching = false;
 
-  /// Focal point at the start of the current pinch gesture.
+  /// Focal point (screen coords) at pinch start.
   Offset _baseFocal = Offset.zero;
-
-  /// Maximum allowed canvas scale.
-  static const double _maxScale = 1.5;
 
   /// Active touch pointer positions (global/screen coordinates).
   /// Used for pinch-to-zoom gesture detection.
@@ -200,7 +196,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     WidgetsBinding.instance.removeObserver(this);
     _snapshotDebounce?.cancel();
     _snapshotImage?.dispose();
-    _rasterCachePool.dispose();
+    _tileCache.dispose();
     super.dispose();
   }
 
@@ -262,6 +258,9 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
           if (!mounted || gen != _loadGeneration) return;
           if (strokes.isNotEmpty) {
             drawingService.loadStrokes(strokes);
+            // Clear tile cache so empty tiles from pre-load paint are
+            // discarded and tiles re-render with the loaded strokes.
+            _tileCache.clear();
             // Async backfill spine data for pre-v5 strokes (fire-and-forget)
             drawingService.backfillSpines(db);
           }
@@ -299,93 +298,123 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     final screenSize = MediaQuery.of(context).size;
     drawingService.setCanvasDimensions(screenSize.width, screenSize.height);
 
+    // During pinch, _renderCamera stays frozen at the pre-pinch state.
+    // A compensating Transform handles the visual scaling/panning so
+    // tiles are NOT re-rendered on every frame during a pinch gesture.
+    final renderViewport = _renderCamera.viewportRect(screenSize);
+    final renderZoom = _renderCamera.zoom;
+
+    // Compensating transform: maps from _renderCamera screen space to
+    // _camera screen space. Identity when not pinching.
+    final Matrix4 compensatingTransform;
+    if (_isPinching) {
+      final relZoom = _camera.zoom / _renderCamera.zoom;
+      final tx = (_renderCamera.topLeft.dx - _camera.topLeft.dx) * _camera.zoom;
+      final ty = (_renderCamera.topLeft.dy - _camera.topLeft.dy) * _camera.zoom;
+      compensatingTransform = Matrix4.identity()
+        ..translate(tx, ty)
+        ..scale(relZoom, relZoom);
+    } else {
+      compensatingTransform = Matrix4.identity();
+    }
+
     return Scaffold(
       body: Stack(
         children: [
-          // Drawing canvas with pinch-to-zoom transform
+          // Layers 1+2: Background + Committed strokes — wrapped in
+          // compensating Transform during pinch for smooth zoom/pan
+          // without re-rendering tiles every frame.
           Positioned.fill(
-            child: ClipRect(
-              child: Transform(
-                transform: Matrix4.identity()
-                  ..translate(_canvasOffset.dx, _canvasOffset.dy)
-                  ..scale(_canvasScale),
-                child: Stack(
-                  children: [
-              // Layer 1: Background (paper + grid) — cached by RepaintBoundary
-              Positioned.fill(
-                child: RepaintBoundary(
-                  child: CustomPaint(
-                    painter: BackgroundPainter(
-                      paperColor: _paperColor,
-                      gridStyle: _gridStyle,
-                      gridSpacing: _gridSpacing,
-                    ),
-                    size: Size.infinite,
-                  ),
-                ),
-              ),
-    
-              // Phase 3: Snapshot overlay — instant display during page switch.
-              // Crossfades out (200ms) when live strokes finish loading.
-              if (_snapshotImage != null)
-                Positioned.fill(
-                  child: AnimatedOpacity(
-                    opacity: _showingSnapshot ? 1.0 : 0.0,
-                    duration: const Duration(milliseconds: 200),
-                    onEnd: () {
-                      // Dispose snapshot image after fade-out completes
-                      if (!_showingSnapshot && _snapshotImage != null) {
-                        setState(() {
-                          _snapshotImage!.dispose();
-                          _snapshotImage = null;
-                        });
-                      }
-                    },
-                    child: CustomPaint(
-                      painter: _SnapshotPainter(_snapshotImage!),
-                      size: Size.infinite,
+            child: Transform(
+              transform: compensatingTransform,
+              child: Stack(
+                children: [
+                  // Layer 1: Background — OUTSIDE main Transform (handles own
+                  // world→screen mapping for infinite grid rendering)
+                  Positioned.fill(
+                    child: RepaintBoundary(
+                      child: CustomPaint(
+                        painter: BackgroundPainter(
+                          paperColor: _paperColor,
+                          gridStyle: _gridStyle,
+                          gridSpacing: _gridSpacing,
+                          viewportRect: renderViewport,
+                          zoom: renderZoom,
+                        ),
+                        size: Size.infinite,
+                      ),
                     ),
                   ),
-                ),
 
-              // Layer 2: Committed strokes — cached by RepaintBoundary
-              Positioned.fill(
-                child: RepaintBoundary(
-                  child: CustomPaint(
-                    painter: CommittedStrokesPainter(
-                      committedStrokes: drawingService.committedStrokes,
-                      erasedStrokeIds: drawingService.erasedStrokeIds,
-                      strokeVersion: drawingService.strokeVersion,
-                      pressureMode: drawingService.pressureMode,
-                      grainIntensity:
-                          drawingService.currentLead?.grainIntensity ?? 0.25,
-                      pressureExponent:
-                          drawingService.pressureCurve.exponent,
-                      rasterCache: _strokeRasterCache,
-                      devicePixelRatio:
-                          MediaQuery.of(context).devicePixelRatio,
-                      lastMutationInfo:
-                          drawingService.lastMutationInfo,
-                      dirtyRegionStrokeIds: drawingService
-                                  .lastMutationInfo.dirtyRect !=
-                              null
-                          ? drawingService.queryStrokesInRect(
-                              drawingService.lastMutationInfo.dirtyRect!)
-                          : null,
+                  // Layer 2: Committed strokes — OUTSIDE main Transform
+                  // (handles own world→screen mapping via tiled rendering)
+                  Positioned.fill(
+                    child: RepaintBoundary(
+                      child: CustomPaint(
+                        painter: CommittedStrokesPainter(
+                          committedStrokes: drawingService.committedStrokes,
+                          erasedStrokeIds: drawingService.erasedStrokeIds,
+                          strokeVersion: drawingService.strokeVersion,
+                          pressureMode: drawingService.pressureMode,
+                          grainIntensity:
+                              drawingService.currentLead?.grainIntensity ??
+                                  0.25,
+                          pressureExponent:
+                              drawingService.pressureCurve.exponent,
+                          tileCache: _tileCache,
+                          spatialGrid: drawingService.spatialGrid,
+                          devicePixelRatio:
+                              MediaQuery.of(context).devicePixelRatio,
+                          viewportRect: renderViewport,
+                          zoom: renderZoom,
+                          lastMutationInfo: drawingService.lastMutationInfo,
+                        ),
+                        size: Size.infinite,
+                      ),
                     ),
-                    size: Size.infinite,
                   ),
+                ],
+              ),
+            ),
+          ),
+
+          // Phase 3: Snapshot overlay — instant display during page switch.
+          // Crossfades out (200ms) when live strokes finish loading.
+          if (_snapshotImage != null)
+            Positioned.fill(
+              child: AnimatedOpacity(
+                opacity: _showingSnapshot ? 1.0 : 0.0,
+                duration: const Duration(milliseconds: 200),
+                onEnd: () {
+                  if (!_showingSnapshot && _snapshotImage != null) {
+                    setState(() {
+                      _snapshotImage!.dispose();
+                      _snapshotImage = null;
+                    });
+                  }
+                },
+                child: CustomPaint(
+                  painter: _SnapshotPainter(_snapshotImage!),
+                  size: Size.infinite,
                 ),
               ),
-    
-              // Layer 3: Active stroke + eraser cursor (with pointer input)
-              Positioned.fill(
-                child: Listener(
-                  onPointerDown: (event) => _handlePointerDown(event),
-                  onPointerMove: (event) => _handlePointerMove(event),
-                  onPointerUp: (event) => _handlePointerUp(event),
-                  onPointerCancel: (event) => _handlePointerCancel(event),
-                  behavior: HitTestBehavior.opaque,
+            ),
+
+          // Layer 3: Active stroke + eraser cursor
+          // Listener is OUTSIDE Transform so it receives touches across the
+          // full screen (important when zoomed out — the world extends beyond
+          // the original canvas bounds). Coordinates are converted from screen
+          // to world space manually via _camera.screenToWorld().
+          Positioned.fill(
+            child: Listener(
+              onPointerDown: (event) => _handlePointerDown(event),
+              onPointerMove: (event) => _handlePointerMove(event),
+              onPointerUp: (event) => _handlePointerUp(event),
+              onPointerCancel: (event) => _handlePointerCancel(event),
+              behavior: HitTestBehavior.opaque,
+              child: ClipRect(
+                child: Transform(
+                  transform: _camera.matrix,
                   child: RepaintBoundary(
                     child: CustomPaint(
                       painter: ActiveStrokePainter(
@@ -397,7 +426,8 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                                 _eraserCursorPosition != null,
                         pressureMode: drawingService.pressureMode,
                         grainIntensity:
-                            drawingService.currentLead?.grainIntensity ?? 0.25,
+                            drawingService.currentLead?.grainIntensity ??
+                                0.25,
                         pressureExponent:
                             drawingService.pressureCurve.exponent,
                         suppressSinglePoint: !_hasStitchPoint,
@@ -405,9 +435,6 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                       size: Size.infinite,
                     ),
                   ),
-                ),
-              ),
-                  ],
                 ),
               ),
             ),
@@ -496,7 +523,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                 // Reload strokes (now empty)
                 final ds = ref.read(drawingServiceProvider);
                 ds.loadStrokes([]);
-                _strokeRasterCache.invalidate();
+                _tileCache.clear();
                 setState(() {
                   _strokesLoaded = false;
                 });
@@ -527,7 +554,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                   ds.loadStrokes(strokes);
                   // Async backfill spine data for pre-v5 strokes
                   ds.backfillSpines(db);
-                  _strokeRasterCache.invalidate();
+                  _tileCache.clear();
                   debugPrint('Post-sync reload: was $oldCount strokes, '
                       'now ${strokes.length}, version=${ds.strokeVersion}');
                   // Force full widget rebuild
@@ -668,12 +695,13 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
 
     // Eraser: find and remove strokes near the point
     if (drawingService.currentTool == ToolType.eraser) {
+      final worldPos = _camera.screenToWorld(event.localPosition);
       _lastErasePosition = null; // reset throttle so first touch always erases
-      setState(() => _eraserCursorPosition = event.localPosition);
+      setState(() => _eraserCursorPosition = worldPos);
       if (drawingService.eraserMode == EraserMode.history) {
-        _historyEraseAt(event.localPosition, drawingService);
+        _historyEraseAt(worldPos, drawingService);
       } else {
-        _standardEraseAt(event.localPosition, drawingService);
+        _standardEraseAt(worldPos, drawingService);
       }
       return;
     }
@@ -720,11 +748,12 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
 
     // Eraser: continuously check for strokes to erase + update cursor
     if (drawingService.currentTool == ToolType.eraser) {
-      setState(() => _eraserCursorPosition = event.localPosition);
+      final worldPos = _camera.screenToWorld(event.localPosition);
+      setState(() => _eraserCursorPosition = worldPos);
       if (drawingService.eraserMode == EraserMode.history) {
-        _historyEraseAt(event.localPosition, drawingService);
+        _historyEraseAt(worldPos, drawingService);
       } else {
-        _standardEraseAt(event.localPosition, drawingService);
+        _standardEraseAt(worldPos, drawingService);
       }
       return;
     }
@@ -787,6 +816,12 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
         _lastCommittedTool = committed.tool;
         _lastCommittedColor = committed.color;
         _lastCommittedWeight = committed.weight;
+      }
+
+      // Invalidate tiles overlapping the new stroke
+      if (committed.points.isNotEmpty) {
+        _tileCache.invalidateRect(committed.boundingRect);
+        _tileCache.bumpVersion();
       }
 
       // Push undo action for the drawn stroke
@@ -993,6 +1028,8 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
       drawingService.addCommittedStrokesForErase(
           strokesToAdd, newlyErasedIds);
       if (dirtyRect != Rect.zero) {
+        _tileCache.invalidateRect(dirtyRect);
+        _tileCache.bumpVersion();
         drawingService.setMutationInfo(MutationInfo.dirtyRegion(dirtyRect));
       }
       drawingService.notifyListeners();
@@ -1055,6 +1092,8 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     );
 
     drawingService.addCommittedStrokes([tombstone]);
+    _tileCache.invalidateRect(newest.boundingRect);
+    _tileCache.bumpVersion();
     drawingService.setMutationInfo(
         MutationInfo.dirtyRegion(newest.boundingRect));
     drawingService.notifyListeners();
@@ -1089,8 +1128,10 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
       _persistStrokes(action.strokesRemoved);
     }
 
-    // Override with dirty-region mutation info
+    // Invalidate tiles + set dirty-region mutation info
     if (dirtyRect != Rect.zero) {
+      _tileCache.invalidateRect(dirtyRect);
+      _tileCache.bumpVersion();
       drawingService.setMutationInfo(MutationInfo.dirtyRegion(dirtyRect));
     }
 
@@ -1117,8 +1158,10 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
       _deleteStrokes(removedIds.toList());
     }
 
-    // Override with dirty-region mutation info
+    // Invalidate tiles + set dirty-region mutation info
     if (dirtyRect != Rect.zero) {
+      _tileCache.invalidateRect(dirtyRect);
+      _tileCache.bumpVersion();
       drawingService.setMutationInfo(MutationInfo.dirtyRegion(dirtyRect));
     }
 
@@ -1178,27 +1221,18 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     _loadGeneration++; // Cancel any in-flight stroke loads
     _snapshotDebounce?.cancel();
 
-    // Phase 3: capture snapshot of current page before leaving.
-    // Uses the raster cache image (already in GPU memory).
-    final currentCache = _rasterCachePool.peek(_pageId);
-    if (currentCache != null && currentCache.image != null) {
-      final snapshotService = ref.read(snapshotServiceProvider);
-      snapshotService?.captureSnapshot(
-        pageId: _pageId,
-        image: currentCache.image!,
-        strokeVersion: drawingService.strokeVersion,
-      );
-    }
+    // TODO: snapshot capture deferred — tile cache doesn't produce a single
+    // full-page image. Revisit if page snapshots are still needed.
 
     // Persist current page + tool settings before leaving
     _persistPageSettings();
     drawingService.saveToolState();
 
-    // Clear drawing state and invalidate raster cache
+    // Clear drawing state and tile cache
     drawingService.clear();
     drawingService.clearUndoHistory();
     _resetStitchState();
-    _strokeRasterCache.invalidate();
+    _tileCache.clear();
 
     // Update the provider to the new page
     ref.read(currentPageIdProvider.notifier).state = newPageId;
@@ -1340,70 +1374,63 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     final positions = _touchPointers.values.toList();
     if (positions.length < 2) return;
     _basePinchDistance = (positions[0] - positions[1]).distance;
-    _baseScale = _canvasScale;
-    _baseOffset = _canvasOffset;
+    _baseCameraSnapshot = _camera.copy();
     _baseFocal = (positions[0] + positions[1]) / 2.0;
+    _isPinching = true;
+    // Freeze renderCamera — tiles won't be re-rendered during pinch.
+    // A compensating Transform handles the visual scaling/panning.
+    _renderCamera = _camera.copy();
   }
 
   /// Update zoom/pan during an active pinch gesture.
+  ///
+  /// Keeps the world point under the pinch focal stationary on screen.
   void _updatePinch() {
-    if (_touchPointers.length < 2 || _basePinchDistance == null) return;
+    if (_touchPointers.length < 2 ||
+        _basePinchDistance == null ||
+        _baseCameraSnapshot == null) return;
     if (_basePinchDistance! < 1.0) return;
 
     final positions = _touchPointers.values.toList();
     final currentDistance = (positions[0] - positions[1]).distance;
     final currentFocal = (positions[0] + positions[1]) / 2.0;
 
-    final rawScale = _baseScale * (currentDistance / _basePinchDistance!);
-    final newScale = rawScale.clamp(1.0, _maxScale);
+    final baseZoom = _baseCameraSnapshot!.zoom;
+    final rawZoom = baseZoom * (currentDistance / _basePinchDistance!);
+    final newZoom = rawZoom.clamp(Camera.minZoom, Camera.maxZoom);
 
-    // Adjust offset so the focal point stays visually stationary
-    final focalDelta = currentFocal - _baseFocal;
-    final scaleRatio = newScale / _baseScale;
-    final newOffset = _baseOffset + focalDelta -
-        (_baseFocal - _baseOffset) * (scaleRatio - 1.0);
+    // The world point under the original focal must stay under the current focal.
+    final focalWorld = _baseCameraSnapshot!.screenToWorld(_baseFocal);
 
     setState(() {
-      _canvasScale = newScale;
-      _canvasOffset = newOffset;
-    });
-  }
-
-  /// End the pinch gesture and clamp the canvas offset.
-  void _endPinch() {
-    _basePinchDistance = null;
-    _clampCanvasOffset();
-  }
-
-  /// Clamp canvas offset so the canvas stays within viewable bounds.
-  void _clampCanvasOffset() {
-    if (_canvasScale <= 1.0) {
-      setState(() {
-        _canvasScale = 1.0;
-        _canvasOffset = Offset.zero;
-      });
-      return;
-    }
-
-    // At scale S, the canvas is S times larger than the viewport.
-    // Maximum pan in each direction = (S - 1) * viewportSize.
-    final size = MediaQuery.of(context).size;
-    final maxDx = ((_canvasScale - 1.0) * size.width) / 2.0;
-    final maxDy = ((_canvasScale - 1.0) * size.height) / 2.0;
-
-    setState(() {
-      _canvasOffset = Offset(
-        _canvasOffset.dx.clamp(-maxDx, maxDx),
-        _canvasOffset.dy.clamp(-maxDy, maxDy),
+      _camera.zoom = newZoom;
+      _camera.topLeft = Offset(
+        focalWorld.dx - currentFocal.dx / newZoom,
+        focalWorld.dy - currentFocal.dy / newZoom,
       );
     });
   }
 
-  /// Reset zoom to 1.0x (double-tap to reset).
+  /// End the pinch gesture. No clamping — infinite pan.
+  void _endPinch() {
+    _basePinchDistance = null;
+    _baseCameraSnapshot = null;
+    if (_isPinching) {
+      _isPinching = false;
+      // Sync renderCamera to current camera. This triggers tile re-render
+      // at the new zoom resolution on the next paint.
+      _renderCamera = _camera.copy();
+      _tileCache.clear(); // Force full re-render at new resolution
+    }
+  }
+
+  /// Reset zoom to 1.0x and pan to origin.
   void _resetZoom() {
     setState(() {
-      _canvasScale = 1.0;
-      _canvasOffset = Offset.zero;
+      _camera.zoom = 1.0;
+      _camera.topLeft = Offset.zero;
+      _renderCamera = _camera.copy();
+      _tileCache.clear();
     });
   }
 
@@ -1419,10 +1446,14 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
   }
 
   /// Convert a Flutter [PointerEvent] to a [StrokePoint].
+  ///
+  /// The Listener is outside the camera Transform, so localPosition is in
+  /// screen coordinates. Convert to world coordinates via the camera.
   StrokePoint _eventToPoint(PointerEvent event) {
+    final world = _camera.screenToWorld(event.localPosition);
     return StrokePoint(
-      x: event.localPosition.dx,
-      y: event.localPosition.dy,
+      x: world.dx,
+      y: world.dy,
       pressure: event.pressure,
       tiltX: event.tilt * 90.0,
       tiltY: 0.0,
@@ -1488,15 +1519,8 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
   /// the SnapshotService's LRU cache and persisted to SQLite for recovery
   /// after app restart.
   void _capturePageSnapshot(DrawingService drawingService) {
-    final cache = _rasterCachePool.peek(_pageId);
-    if (cache == null || cache.image == null) return;
-
-    final snapshotService = ref.read(snapshotServiceProvider);
-    snapshotService?.captureSnapshot(
-      pageId: _pageId,
-      image: cache.image!,
-      strokeVersion: drawingService.strokeVersion,
-    );
+    // TODO: tile cache doesn't produce a single full-page image.
+    // Snapshot capture deferred until a composite image approach is added.
   }
 
   /// Persist current page settings (grid style, spacing, paper color) to SQLite.

@@ -1,27 +1,22 @@
-import 'dart:math';
 import 'dart:ui';
 
 import '../models/stroke.dart';
 
-/// Uniform grid hash for O(1) spatial lookup of strokes by region.
+/// Unbounded uniform grid hash for O(1) spatial lookup of strokes by region.
 ///
 /// Each cell is [cellSize]×[cellSize] logical pixels. A stroke is inserted
-/// into every cell its [Stroke.boundingRect] overlaps (typically 1–4 cells).
+/// into every cell its bounding rect overlaps (typically 1–4 cells).
 /// Queries return the set of stroke IDs whose bounding rects overlap the
 /// queried region.
 ///
-/// Used by the eraser (hit testing) and dirty-region rebuild (finding
-/// strokes that overlap a damaged rect).
+/// Unlike a bounded grid, this supports infinite coordinates (negative and
+/// arbitrarily large) via hash-based cell keys (Cantor pairing function).
+///
+/// Used by the eraser (hit testing), dirty-region rebuild, and tiled rendering.
 class SpatialGrid {
-  SpatialGrid(this.cellSize, this.canvasWidth, this.canvasHeight)
-      : _columns = max(1, (canvasWidth / cellSize).ceil()),
-        _rows = max(1, (canvasHeight / cellSize).ceil());
+  SpatialGrid(this.cellSize);
 
   final double cellSize;
-  final double canvasWidth;
-  final double canvasHeight;
-  final int _columns;
-  final int _rows;
 
   /// Cell key → stroke IDs occupying that cell.
   final Map<int, Set<String>> _cells = {};
@@ -83,17 +78,28 @@ class SpatialGrid {
     }
   }
 
-  /// Compute cell keys that overlap [rect].
+  /// Hash a (col, row) pair into a single int key.
+  ///
+  /// Uses Cantor pairing on non-negative indices. Negative grid coordinates
+  /// are mapped to non-negative via zigzag encoding (0 → 0, -1 → 1, 1 → 2,
+  /// -2 → 3, 2 → 4, …) so all ints produce unique, non-negative values.
+  static int cellKey(int col, int row) {
+    final c = col >= 0 ? 2 * col : -2 * col - 1;
+    final r = row >= 0 ? 2 * row : -2 * row - 1;
+    return (c + r) * (c + r + 1) ~/ 2 + r;
+  }
+
+  /// Compute cell keys that overlap [rect]. No clamping — works for any coords.
   List<int> _cellKeysForRect(Rect rect) {
-    final colMin = max(0, (rect.left / cellSize).floor());
-    final colMax = min(_columns - 1, (rect.right / cellSize).floor());
-    final rowMin = max(0, (rect.top / cellSize).floor());
-    final rowMax = min(_rows - 1, (rect.bottom / cellSize).floor());
+    final colMin = (rect.left / cellSize).floor();
+    final colMax = (rect.right / cellSize).floor();
+    final rowMin = (rect.top / cellSize).floor();
+    final rowMax = (rect.bottom / cellSize).floor();
 
     final keys = <int>[];
     for (int r = rowMin; r <= rowMax; r++) {
       for (int c = colMin; c <= colMax; c++) {
-        keys.add(r * _columns + c);
+        keys.add(cellKey(c, r));
       }
     }
     return keys;

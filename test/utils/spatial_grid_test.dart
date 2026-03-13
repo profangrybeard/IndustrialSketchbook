@@ -28,7 +28,7 @@ Stroke _makeStroke(String id, double x1, double y1, double x2, double y2) {
 void main() {
   group('SpatialGrid', () {
     test('GRID-001: insert and query overlapping rect returns stroke', () {
-      final grid = SpatialGrid(128, 1200, 800);
+      final grid = SpatialGrid(128);
       grid.insert('s1', const Rect.fromLTWH(50, 50, 100, 100));
 
       final result = grid.queryRect(const Rect.fromLTWH(60, 60, 20, 20));
@@ -36,7 +36,7 @@ void main() {
     });
 
     test('GRID-002: query non-overlapping rect returns empty', () {
-      final grid = SpatialGrid(128, 1200, 800);
+      final grid = SpatialGrid(128);
       grid.insert('s1', const Rect.fromLTWH(50, 50, 100, 100));
 
       final result = grid.queryRect(const Rect.fromLTWH(500, 500, 20, 20));
@@ -44,7 +44,7 @@ void main() {
     });
 
     test('GRID-003: many strokes, query returns only overlapping', () {
-      final grid = SpatialGrid(128, 1200, 800);
+      final grid = SpatialGrid(128);
       // Scatter 100 strokes across the canvas
       for (int i = 0; i < 100; i++) {
         final x = (i % 10) * 120.0;
@@ -60,7 +60,7 @@ void main() {
     });
 
     test('GRID-004: remove stroke, no longer returned', () {
-      final grid = SpatialGrid(128, 1200, 800);
+      final grid = SpatialGrid(128);
       grid.insert('s1', const Rect.fromLTWH(50, 50, 100, 100));
       grid.remove('s1');
 
@@ -69,7 +69,7 @@ void main() {
     });
 
     test('GRID-005: stroke spanning multiple cells returned from any cell', () {
-      final grid = SpatialGrid(128, 1200, 800);
+      final grid = SpatialGrid(128);
       // Stroke spans from (0,0) to (400,400) — many cells
       grid.insert('s1', const Rect.fromLTWH(0, 0, 400, 400));
 
@@ -94,11 +94,11 @@ void main() {
       ];
 
       // Build via rebuild
-      final grid1 = SpatialGrid(128, 1200, 800);
+      final grid1 = SpatialGrid(128);
       grid1.rebuild(strokes, {});
 
       // Build via individual inserts
-      final grid2 = SpatialGrid(128, 1200, 800);
+      final grid2 = SpatialGrid(128);
       for (final s in strokes) {
         grid2.insert(s.id, s.boundingRect);
       }
@@ -112,7 +112,7 @@ void main() {
     });
 
     test('GRID-007: queryPoint with radius', () {
-      final grid = SpatialGrid(128, 1200, 800);
+      final grid = SpatialGrid(128);
       grid.insert('s1', const Rect.fromLTWH(100, 100, 50, 50));
 
       // Point inside the stroke's bounding rect
@@ -125,13 +125,13 @@ void main() {
     });
 
     test('GRID-008: empty grid returns empty set', () {
-      final grid = SpatialGrid(128, 1200, 800);
+      final grid = SpatialGrid(128);
       final result = grid.queryRect(const Rect.fromLTWH(0, 0, 1200, 800));
       expect(result, isEmpty);
     });
 
     test('GRID-009: strokes on cell boundary belong to adjacent cells', () {
-      final grid = SpatialGrid(128, 1200, 800);
+      final grid = SpatialGrid(128);
       // Place stroke exactly at cell boundary (128, 128)
       grid.insert('s1', const Rect.fromLTWH(120, 120, 16, 16));
 
@@ -156,7 +156,7 @@ void main() {
         ),
       ];
 
-      final grid = SpatialGrid(128, 1200, 800);
+      final grid = SpatialGrid(128);
       grid.rebuild(strokes, {'s1'});
 
       // s1 is erased, t1 is a tombstone — neither should be in the grid
@@ -165,7 +165,7 @@ void main() {
     });
 
     test('clear removes all entries', () {
-      final grid = SpatialGrid(128, 1200, 800);
+      final grid = SpatialGrid(128);
       grid.insert('s1', const Rect.fromLTWH(50, 50, 100, 100));
       grid.insert('s2', const Rect.fromLTWH(500, 500, 100, 100));
       expect(grid.strokeCount, 2);
@@ -176,7 +176,7 @@ void main() {
     });
 
     test('strokeCount tracks insertions and removals', () {
-      final grid = SpatialGrid(128, 1200, 800);
+      final grid = SpatialGrid(128);
       expect(grid.strokeCount, 0);
 
       grid.insert('s1', const Rect.fromLTWH(0, 0, 50, 50));
@@ -190,19 +190,58 @@ void main() {
     });
 
     test('removing non-existent stroke is a no-op', () {
-      final grid = SpatialGrid(128, 1200, 800);
+      final grid = SpatialGrid(128);
       grid.insert('s1', const Rect.fromLTWH(0, 0, 50, 50));
       grid.remove('nonexistent');
       expect(grid.strokeCount, 1);
     });
 
     test('negative coordinates handled gracefully', () {
-      final grid = SpatialGrid(128, 1200, 800);
-      // Stroke partially off-screen (negative coords clamped to cell 0)
+      final grid = SpatialGrid(128);
+      // Stroke in negative coordinate space
       grid.insert('s1', const Rect.fromLTWH(-50, -50, 100, 100));
 
       final result = grid.queryRect(const Rect.fromLTWH(0, 0, 50, 50));
       expect(result, contains('s1'));
+    });
+
+    test('fully negative coordinates query works', () {
+      final grid = SpatialGrid(128);
+      grid.insert('s1', const Rect.fromLTWH(-500, -500, 50, 50));
+
+      // Query the same negative region
+      final r1 = grid.queryRect(const Rect.fromLTWH(-510, -510, 70, 70));
+      expect(r1, contains('s1'));
+
+      // Query far from that region
+      final r2 = grid.queryRect(const Rect.fromLTWH(0, 0, 50, 50));
+      expect(r2, isNot(contains('s1')));
+    });
+
+    test('very large coordinates work', () {
+      final grid = SpatialGrid(128);
+      grid.insert('s1', const Rect.fromLTWH(50000, 50000, 100, 100));
+
+      final result = grid.queryRect(const Rect.fromLTWH(50010, 50010, 50, 50));
+      expect(result, contains('s1'));
+    });
+
+    test('cellKey is consistent for same inputs', () {
+      expect(SpatialGrid.cellKey(5, 3), equals(SpatialGrid.cellKey(5, 3)));
+      expect(SpatialGrid.cellKey(-1, -1), equals(SpatialGrid.cellKey(-1, -1)));
+    });
+
+    test('cellKey is unique for different inputs', () {
+      // A handful of distinct (col, row) pairs should all produce unique keys
+      final keys = <int>{};
+      for (int c = -3; c <= 3; c++) {
+        for (int r = -3; r <= 3; r++) {
+          final key = SpatialGrid.cellKey(c, r);
+          expect(keys.contains(key), isFalse,
+              reason: 'cellKey($c, $r) = $key collided');
+          keys.add(key);
+        }
+      }
     });
   });
 }

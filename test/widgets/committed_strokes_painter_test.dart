@@ -1,20 +1,22 @@
+import 'dart:ui';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:industrial_sketchbook/models/pressure_mode.dart';
 import 'package:industrial_sketchbook/services/drawing_service.dart'
     show MutationInfo;
 import 'package:industrial_sketchbook/widgets/committed_strokes_painter.dart';
-import 'package:industrial_sketchbook/widgets/stroke_raster_cache.dart';
+import 'package:industrial_sketchbook/widgets/tile_cache.dart';
 
 void main() {
   group('CommittedStrokesPainter.shouldRepaint', () {
-    late StrokeRasterCache rasterCache;
+    late TileCache tileCache;
 
     setUp(() {
-      rasterCache = StrokeRasterCache();
+      tileCache = TileCache(maxTiles: 4);
     });
 
     tearDown(() {
-      rasterCache.dispose();
+      tileCache.dispose();
     });
 
     CommittedStrokesPainter makePainter({
@@ -22,6 +24,8 @@ void main() {
       PressureMode pressureMode = PressureMode.width,
       double grainIntensity = 0.25,
       double pressureExponent = 1.8,
+      Rect viewportRect = const Rect.fromLTWH(0, 0, 1200, 800),
+      double zoom = 1.0,
     }) {
       return CommittedStrokesPainter(
         committedStrokes: const [],
@@ -30,8 +34,11 @@ void main() {
         pressureMode: pressureMode,
         grainIntensity: grainIntensity,
         pressureExponent: pressureExponent,
-        rasterCache: rasterCache,
+        tileCache: tileCache,
+        spatialGrid: null,
         devicePixelRatio: 1.0,
+        viewportRect: viewportRect,
+        zoom: zoom,
         lastMutationInfo: const MutationInfo.fullRebuild(),
       );
     }
@@ -63,6 +70,20 @@ void main() {
     test('returns true when pressureExponent changes', () {
       final old = makePainter(pressureExponent: 1.8);
       final current = makePainter(pressureExponent: 2.5);
+      expect(current.shouldRepaint(old), isTrue);
+    });
+
+    test('returns true when viewportRect changes', () {
+      final old = makePainter(
+          viewportRect: const Rect.fromLTWH(0, 0, 1200, 800));
+      final current = makePainter(
+          viewportRect: const Rect.fromLTWH(100, 100, 1200, 800));
+      expect(current.shouldRepaint(old), isTrue);
+    });
+
+    test('returns true when zoom changes', () {
+      final old = makePainter(zoom: 1.0);
+      final current = makePainter(zoom: 2.0);
       expect(current.shouldRepaint(old), isTrue);
     });
   });
