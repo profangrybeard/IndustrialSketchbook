@@ -310,6 +310,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     }
 
     return Scaffold(
+      backgroundColor: _paperColor,
       body: Stack(
         children: [
           // Layers 1+2: Background + Committed strokes — wrapped in
