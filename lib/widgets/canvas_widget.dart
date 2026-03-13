@@ -161,10 +161,6 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
   // Pressure deadzone (prevents accidental strokes from light touches)
   // ---------------------------------------------------------------------------
 
-  /// Minimum pressure required to start a stroke. Touches below this
-  /// threshold are ignored until pressure rises above it.
-  static const double _pressureDeadzone = 0.12;
-
   /// True when pen-down was rejected due to pressure below deadzone.
   /// Reset on pen-up. If pressure rises above threshold during a move,
   /// the stroke starts then.
@@ -352,10 +348,10 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                           strokeVersion: drawingService.strokeVersion,
                           pressureMode: drawingService.pressureMode,
                           grainIntensity:
-                              drawingService.currentLead?.grainIntensity ??
-                                  0.25,
+                              drawingService.effectiveGrainIntensity,
                           pressureExponent:
-                              drawingService.pressureCurve.exponent,
+                              drawingService.effectivePressureExponent,
+                          replayArcLength: drawingService.replayArcLength,
                           tileCache: _tileCache,
                           spatialGrid: drawingService.spatialGrid,
                           devicePixelRatio:
@@ -421,10 +417,10 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                                 _eraserCursorPosition != null,
                         pressureMode: drawingService.pressureMode,
                         grainIntensity:
-                            drawingService.currentLead?.grainIntensity ??
-                                0.25,
+                            drawingService.effectiveGrainIntensity,
                         pressureExponent:
-                            drawingService.pressureCurve.exponent,
+                            drawingService.effectivePressureExponent,
+                        liveArcLength: drawingService.liveArcLength,
                         suppressSinglePoint: !_hasStitchPoint,
                       ),
                       size: Size.infinite,
@@ -704,7 +700,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     // --- Pressure deadzone ---
     // Reject pen-down if pressure is below threshold to prevent
     // accidental strokes from light stylus contact.
-    if (event.pressure < _pressureDeadzone) {
+    if (event.pressure < drawingService.pressureDeadzone) {
       _belowDeadzone = true;
       return;
     }
@@ -756,7 +752,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     // Pressure deadzone: if pen-down was rejected, check if pressure
     // has risen above threshold. If so, start the stroke now.
     if (_belowDeadzone) {
-      if (event.pressure < _pressureDeadzone) return;
+      if (event.pressure < drawingService.pressureDeadzone) return;
       // Pressure crossed threshold — start stroke from this point
       _belowDeadzone = false;
       final point = _eventToPoint(event);

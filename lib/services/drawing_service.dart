@@ -302,6 +302,68 @@ class DrawingService extends ChangeNotifier {
   }
 
   // ---------------------------------------------------------------------------
+  // Runtime quality overrides (dev menu)
+  // ---------------------------------------------------------------------------
+
+  /// Override grain intensity (null = use pencil lead preset).
+  double? _grainIntensityOverride;
+  double? get grainIntensityOverride => _grainIntensityOverride;
+  set grainIntensityOverride(double? value) {
+    if (_grainIntensityOverride != value) {
+      _grainIntensityOverride = value;
+      notifyListeners();
+    }
+  }
+
+  /// Override pressure exponent (null = use pressure curve preset).
+  double? _pressureExponentOverride;
+  double? get pressureExponentOverride => _pressureExponentOverride;
+  set pressureExponentOverride(double? value) {
+    if (_pressureExponentOverride != value) {
+      _pressureExponentOverride = value;
+      notifyListeners();
+    }
+  }
+
+  /// Override replay arc length (null = use default 1.5).
+  double _replayArcLength = 1.5;
+  double get replayArcLength => _replayArcLength;
+  set replayArcLength(double value) {
+    if (_replayArcLength != value) {
+      _replayArcLength = value;
+      notifyListeners();
+    }
+  }
+
+  /// Override live drawing arc length (null = use default 0.5).
+  double _liveArcLength = 0.5;
+  double get liveArcLength => _liveArcLength;
+  set liveArcLength(double value) {
+    if (_liveArcLength != value) {
+      _liveArcLength = value;
+      notifyListeners();
+    }
+  }
+
+  /// Override pressure deadzone (default 0.12).
+  double _pressureDeadzone = 0.12;
+  double get pressureDeadzone => _pressureDeadzone;
+  set pressureDeadzone(double value) {
+    if (_pressureDeadzone != value) {
+      _pressureDeadzone = value;
+      notifyListeners();
+    }
+  }
+
+  /// Effective grain intensity: override if set, else lead preset, else 0.25.
+  double get effectiveGrainIntensity =>
+      _grainIntensityOverride ?? currentLead?.grainIntensity ?? 0.25;
+
+  /// Effective pressure exponent: override if set, else curve preset.
+  double get effectivePressureExponent =>
+      _pressureExponentOverride ?? _pressureCurve.exponent;
+
+  // ---------------------------------------------------------------------------
   // Eraser mode
   // ---------------------------------------------------------------------------
 
@@ -630,6 +692,20 @@ class DrawingService extends ChangeNotifier {
       } else {
         await prefs.remove('tool_pencilLead');
       }
+      // Dev menu quality overrides
+      await prefs.setDouble('dev_replayArcLength', _replayArcLength);
+      await prefs.setDouble('dev_liveArcLength', _liveArcLength);
+      await prefs.setDouble('dev_pressureDeadzone', _pressureDeadzone);
+      if (_grainIntensityOverride != null) {
+        await prefs.setDouble('dev_grainIntensity', _grainIntensityOverride!);
+      } else {
+        await prefs.remove('dev_grainIntensity');
+      }
+      if (_pressureExponentOverride != null) {
+        await prefs.setDouble('dev_pressureExponent', _pressureExponentOverride!);
+      } else {
+        await prefs.remove('dev_pressureExponent');
+      }
     } catch (e) {
       debugPrint('Failed to save tool state: $e');
     }
@@ -683,6 +759,19 @@ class DrawingService extends ChangeNotifier {
           orElse: () => PencilLead.medium,
         );
       }
+
+      // Dev menu quality overrides
+      final replayArc = prefs.getDouble('dev_replayArcLength');
+      if (replayArc != null) _replayArcLength = replayArc;
+
+      final liveArc = prefs.getDouble('dev_liveArcLength');
+      if (liveArc != null) _liveArcLength = liveArc;
+
+      final deadzone = prefs.getDouble('dev_pressureDeadzone');
+      if (deadzone != null) _pressureDeadzone = deadzone;
+
+      _grainIntensityOverride = prefs.getDouble('dev_grainIntensity');
+      _pressureExponentOverride = prefs.getDouble('dev_pressureExponent');
 
       notifyListeners();
     } catch (e) {

@@ -23,6 +23,7 @@ class ActiveStrokePainter extends CustomPainter {
     required this.pressureMode,
     required this.grainIntensity,
     required this.pressureExponent,
+    this.liveArcLength = 0.5,
     required this.suppressSinglePoint,
   });
 
@@ -46,6 +47,9 @@ class ActiveStrokePainter extends CustomPainter {
 
   /// Power-curve exponent for pencil pressure mapping.
   final double pressureExponent;
+
+  /// Arc length for live drawing fidelity.
+  final double liveArcLength;
 
   /// When true, skip rendering inflight strokes with only 1 point.
   ///
@@ -73,6 +77,7 @@ class ActiveStrokePainter extends CustomPainter {
           pressureMode: pressureMode,
           grainIntensity: grainIntensity,
           pressureExponent: pressureExponent,
+          targetArcLength: liveArcLength,
         );
         sw.stop();
         perf.recordActiveStrokePaint(sw.elapsedMicroseconds);

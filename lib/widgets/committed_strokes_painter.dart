@@ -30,6 +30,7 @@ class CommittedStrokesPainter extends CustomPainter {
     required this.pressureMode,
     required this.grainIntensity,
     required this.pressureExponent,
+    required this.replayArcLength,
     required this.tileCache,
     required this.spatialGrid,
     required this.devicePixelRatio,
@@ -55,6 +56,9 @@ class CommittedStrokesPainter extends CustomPainter {
 
   /// Power-curve exponent for pencil pressure mapping.
   final double pressureExponent;
+
+  /// Arc length for replay/committed stroke rendering.
+  final double replayArcLength;
 
   /// Per-tile raster cache shared across paints. Owned by CanvasWidget.
   final TileCache tileCache;
@@ -220,7 +224,7 @@ class CommittedStrokesPainter extends CustomPainter {
         pressureMode: pressureMode,
         grainIntensity: grainIntensity,
         pressureExponent: pressureExponent,
-        targetArcLength: rendering.replayTargetArcLength,
+        targetArcLength: replayArcLength,
       );
     }
 
@@ -239,6 +243,7 @@ class CommittedStrokesPainter extends CustomPainter {
         zoom != oldDelegate.zoom ||
         pressureMode != oldDelegate.pressureMode ||
         grainIntensity != oldDelegate.grainIntensity ||
-        pressureExponent != oldDelegate.pressureExponent;
+        pressureExponent != oldDelegate.pressureExponent ||
+        replayArcLength != oldDelegate.replayArcLength;
   }
 }
