@@ -354,6 +354,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                           pressureExponent:
                               drawingService.effectivePressureExponent,
                           replayArcLength: drawingService.replayArcLength,
+                          tiltStrength: drawingService.tiltStrength,
                           tileCache: _tileCache,
                           spatialGrid: drawingService.spatialGrid,
                           devicePixelRatio:
@@ -422,6 +423,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                             drawingService.effectiveGrainIntensity,
                         pressureExponent:
                             drawingService.effectivePressureExponent,
+                        tiltStrength: drawingService.tiltStrength,
                         liveArcLength: drawingService.liveArcLength,
                         suppressSinglePoint: !_hasStitchPoint,
                       ),

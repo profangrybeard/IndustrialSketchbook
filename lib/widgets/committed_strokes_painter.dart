@@ -31,6 +31,7 @@ class CommittedStrokesPainter extends CustomPainter {
     required this.grainIntensity,
     required this.pressureExponent,
     required this.replayArcLength,
+    required this.tiltStrength,
     required this.tileCache,
     required this.spatialGrid,
     required this.devicePixelRatio,
@@ -59,6 +60,9 @@ class CommittedStrokesPainter extends CustomPainter {
 
   /// Arc length for replay/committed stroke rendering.
   final double replayArcLength;
+
+  /// Tilt effect strength (0.0 = off, 1.0 = full tilt shading).
+  final double tiltStrength;
 
   /// Per-tile raster cache shared across paints. Owned by CanvasWidget.
   final TileCache tileCache;
@@ -224,6 +228,7 @@ class CommittedStrokesPainter extends CustomPainter {
         pressureMode: pressureMode,
         grainIntensity: grainIntensity,
         pressureExponent: pressureExponent,
+        tiltStrength: tiltStrength,
         targetArcLength: replayArcLength,
       );
     }
@@ -244,6 +249,7 @@ class CommittedStrokesPainter extends CustomPainter {
         pressureMode != oldDelegate.pressureMode ||
         grainIntensity != oldDelegate.grainIntensity ||
         pressureExponent != oldDelegate.pressureExponent ||
-        replayArcLength != oldDelegate.replayArcLength;
+        replayArcLength != oldDelegate.replayArcLength ||
+        tiltStrength != oldDelegate.tiltStrength;
   }
 }

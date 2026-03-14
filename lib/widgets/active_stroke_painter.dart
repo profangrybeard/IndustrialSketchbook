@@ -23,6 +23,7 @@ class ActiveStrokePainter extends CustomPainter {
     required this.pressureMode,
     required this.grainIntensity,
     required this.pressureExponent,
+    this.tiltStrength = 0.0,
     this.liveArcLength = 0.5,
     required this.suppressSinglePoint,
   });
@@ -47,6 +48,9 @@ class ActiveStrokePainter extends CustomPainter {
 
   /// Power-curve exponent for pencil pressure mapping.
   final double pressureExponent;
+
+  /// Tilt effect strength (0.0 = off, 1.0 = full tilt shading).
+  final double tiltStrength;
 
   /// Arc length for live drawing fidelity.
   final double liveArcLength;
@@ -77,6 +81,7 @@ class ActiveStrokePainter extends CustomPainter {
           pressureMode: pressureMode,
           grainIntensity: grainIntensity,
           pressureExponent: pressureExponent,
+          tiltStrength: tiltStrength,
           targetArcLength: liveArcLength,
         );
         sw.stop();

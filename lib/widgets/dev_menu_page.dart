@@ -143,6 +143,16 @@ class _DevMenuPageState extends ConsumerState<DevMenuPage> {
             onChanged: (v) => ds.pressureDeadzone = v,
           ),
 
+          _qualitySlider(
+            label: 'Tilt Shading',
+            value: ds.tiltStrength,
+            min: 0.0,
+            max: 1.0,
+            defaultValue: 0.0,
+            description: 'Stylus tilt widens stroke + fades opacity (pencil side-shading effect).',
+            onChanged: (v) => ds.tiltStrength = v,
+          ),
+
           const SizedBox(height: 8),
           Align(
             alignment: Alignment.centerRight,
@@ -153,6 +163,7 @@ class _DevMenuPageState extends ConsumerState<DevMenuPage> {
                 ds.grainIntensityOverride = null;
                 ds.pressureExponentOverride = null;
                 ds.pressureDeadzone = 0.12;
+                ds.tiltStrength = 0.0;
                 ds.saveToolState();
               },
               icon: const Icon(Icons.restore, size: 16),

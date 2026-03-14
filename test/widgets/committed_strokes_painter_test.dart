@@ -35,6 +35,7 @@ void main() {
         grainIntensity: grainIntensity,
         pressureExponent: pressureExponent,
         replayArcLength: 1.5,
+        tiltStrength: 0.0,
         tileCache: tileCache,
         spatialGrid: null,
         devicePixelRatio: 1.0,
