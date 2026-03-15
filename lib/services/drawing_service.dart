@@ -355,6 +355,16 @@ class DrawingService extends ChangeNotifier {
     }
   }
 
+  /// Tilt effect strength (0.0 = off, 1.0 = full tilt shading).
+  double _tiltStrength = 0.0;
+  double get tiltStrength => _tiltStrength;
+  set tiltStrength(double value) {
+    if (_tiltStrength != value) {
+      _tiltStrength = value;
+      notifyListeners();
+    }
+  }
+
   /// Effective grain intensity: override if set, else lead preset, else 0.25.
   double get effectiveGrainIntensity =>
       _grainIntensityOverride ?? currentLead?.grainIntensity ?? 0.25;
@@ -706,6 +716,7 @@ class DrawingService extends ChangeNotifier {
       } else {
         await prefs.remove('dev_pressureExponent');
       }
+      await prefs.setDouble('dev_tiltStrength', _tiltStrength);
     } catch (e) {
       debugPrint('Failed to save tool state: $e');
     }
@@ -772,6 +783,9 @@ class DrawingService extends ChangeNotifier {
 
       _grainIntensityOverride = prefs.getDouble('dev_grainIntensity');
       _pressureExponentOverride = prefs.getDouble('dev_pressureExponent');
+
+      final tilt = prefs.getDouble('dev_tiltStrength');
+      if (tilt != null) _tiltStrength = tilt;
 
       notifyListeners();
     } catch (e) {

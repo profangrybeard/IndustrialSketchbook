@@ -47,6 +47,22 @@ double tiltOpacityFade(double tiltX) {
   return 1.0 - tiltFraction * 0.3;
 }
 
+/// Tilt width multiplier scaled by [strength] (0.0–1.0).
+///
+/// At strength 0 returns 1.0 (no effect). At strength 1.0 returns the
+/// full [tiltWidthMultiplier]. Intermediate values lerp between.
+double _lerpTiltWidth(double tiltX, double strength) {
+  return 1.0 + (tiltWidthMultiplier(tiltX) - 1.0) * strength;
+}
+
+/// Tilt opacity fade scaled by [strength] (0.0–1.0).
+///
+/// At strength 0 returns 1.0 (no effect). At strength 1.0 returns the
+/// full [tiltOpacityFade]. Intermediate values lerp between.
+double _lerpTiltOpacity(double tiltX, double strength) {
+  return 1.0 + (tiltOpacityFade(tiltX) - 1.0) * strength;
+}
+
 /// Position-based deterministic grain texture.
 ///
 /// Returns a value in [1 - intensity, 1.0] that creates subtle per-segment
@@ -335,6 +351,7 @@ void renderStroke(
   required PressureMode pressureMode,
   required double grainIntensity,
   required double pressureExponent,
+  double tiltStrength = 0.0,
   double targetArcLength = _defaultTargetArcLength,
 }) {
   final points = stroke.renderPoints;
@@ -393,7 +410,7 @@ void renderStroke(
   if (isPencil) {
     _renderPencilStroke(canvas, stroke, paint, baseColor, baseAlpha,
         pressureMode, grainIntensity, pressureExponent,
-        targetArcLength: targetArcLength);
+        tiltStrength: tiltStrength, targetArcLength: targetArcLength);
   } else {
     _renderStandardStroke(canvas, stroke, paint, targetArcLength: targetArcLength);
   }
@@ -508,6 +525,7 @@ void _renderPencilStroke(
   PressureMode pressureMode,
   double grainIntensity,
   double pressureExponent, {
+  double tiltStrength = 0.0,
   double targetArcLength = _defaultTargetArcLength,
 }
 ) {
@@ -517,23 +535,28 @@ void _renderPencilStroke(
   canvas.saveLayer(stroke.boundingRect, Paint());
 
   // 2 points: simple ribbon
-  // Phase 2: tilt and velocity dropped from pencil rendering.
-  // Only pressure + grain affect visuals.
   if (points.length == 2) {
     final p0 = points[0];
     final p1 = points[1];
     final pencilP0 = pencilPressure(p0.pressure, exponent: pressureExponent);
     final pencilP1 = pencilPressure(p1.pressure, exponent: pressureExponent);
 
+    // Tilt effects (scaled by tiltStrength)
+    final tiltW0 = tiltStrength > 0 ? _lerpTiltWidth(p0.tiltX, tiltStrength) : 1.0;
+    final tiltW1 = tiltStrength > 0 ? _lerpTiltWidth(p1.tiltX, tiltStrength) : 1.0;
+    final avgTiltOpacity = tiltStrength > 0
+        ? _lerpTiltOpacity((p0.tiltX + p1.tiltX) / 2, tiltStrength)
+        : 1.0;
+
     double hw0, hw1;
     switch (pressureMode) {
       case PressureMode.opacity:
-        hw0 = stroke.weight / 2.0;
-        hw1 = stroke.weight / 2.0;
+        hw0 = stroke.weight * tiltW0 / 2.0;
+        hw1 = stroke.weight * tiltW1 / 2.0;
       case PressureMode.width:
       case PressureMode.both:
-        hw0 = stroke.weight * math.max(pencilP0, 0.1) / 2.0;
-        hw1 = stroke.weight * math.max(pencilP1, 0.1) / 2.0;
+        hw0 = stroke.weight * math.max(pencilP0, 0.1) * tiltW0 / 2.0;
+        hw1 = stroke.weight * math.max(pencilP1, 0.1) * tiltW1 / 2.0;
     }
 
     final avgPencilP = (pencilP0 + pencilP1) / 2.0;
@@ -542,10 +565,10 @@ void _renderPencilStroke(
     double alpha;
     switch (pressureMode) {
       case PressureMode.width:
-        alpha = baseAlpha * 0.7 * grain;
+        alpha = baseAlpha * 0.7 * grain * avgTiltOpacity;
       case PressureMode.opacity:
       case PressureMode.both:
-        alpha = baseAlpha * 0.7 * math.max(avgPencilP, 0.1) * grain;
+        alpha = baseAlpha * 0.7 * math.max(avgPencilP, 0.1) * grain * avgTiltOpacity;
     }
 
     final spinePoints = <_SpinePoint>[
@@ -568,7 +591,9 @@ void _renderPencilStroke(
   final spineAlphas = <double>[];
   final prebaked = stroke.spineData;
 
-  if (prebaked != null && prebaked.length >= 2) {
+  // When tilt is active, skip pre-baked spines (they lack tiltX data)
+  // and fall through to on-the-fly computation from raw StrokePoints.
+  if (prebaked != null && prebaked.length >= 2 && tiltStrength <= 0) {
     // Fast path: pre-baked spines — skip Catmull-Rom subdivision entirely.
     // Compute halfWidth and alpha from stored pressure + current params.
     for (final sp in prebaked) {
@@ -593,26 +618,29 @@ void _renderPencilStroke(
       spineAlphas.add(alpha.clamp(0.01, 1.0));
     }
   } else {
-    // Fallback: compute on-the-fly (old strokes without spine data)
+    // On-the-fly path: compute from raw StrokePoints (has tiltX for tilt effects).
     final firstP = points[0];
     final firstPencilP = pencilPressure(firstP.pressure, exponent: pressureExponent);
+    final firstTiltW = tiltStrength > 0 ? _lerpTiltWidth(firstP.tiltX, tiltStrength) : 1.0;
+    final firstTiltO = tiltStrength > 0 ? _lerpTiltOpacity(firstP.tiltX, tiltStrength) : 1.0;
+
     double firstHW;
     switch (pressureMode) {
       case PressureMode.opacity:
-        firstHW = stroke.weight / 2.0;
+        firstHW = stroke.weight * firstTiltW / 2.0;
       case PressureMode.width:
       case PressureMode.both:
-        firstHW = stroke.weight * math.max(firstPencilP, 0.1) / 2.0;
+        firstHW = stroke.weight * math.max(firstPencilP, 0.1) * firstTiltW / 2.0;
     }
     spinePoints.add(_SpinePoint(firstP.x, firstP.y, firstHW));
 
     double firstAlpha;
     switch (pressureMode) {
       case PressureMode.width:
-        firstAlpha = baseAlpha * 0.7;
+        firstAlpha = baseAlpha * 0.7 * firstTiltO;
       case PressureMode.opacity:
       case PressureMode.both:
-        firstAlpha = baseAlpha * 0.7 * math.max(firstPencilP, 0.1);
+        firstAlpha = baseAlpha * 0.7 * math.max(firstPencilP, 0.1) * firstTiltO;
     }
     spineAlphas.add(firstAlpha.clamp(0.01, 1.0));
 
@@ -640,18 +668,23 @@ void _renderPencilStroke(
         final pencilP = pencilPressure(pressure, exponent: pressureExponent);
         final grain = grainFactor(x, y, grainIntensity);
 
+        // Interpolate tiltX between segment endpoints
+        final tiltX = p1.tiltX + (p2.tiltX - p1.tiltX) * t;
+        final tiltW = tiltStrength > 0 ? _lerpTiltWidth(tiltX, tiltStrength) : 1.0;
+        final tiltO = tiltStrength > 0 ? _lerpTiltOpacity(tiltX, tiltStrength) : 1.0;
+
         double hw;
         double alpha;
         switch (pressureMode) {
           case PressureMode.width:
-            hw = stroke.weight * math.max(pencilP, 0.1) / 2.0;
-            alpha = baseAlpha * 0.7 * grain;
+            hw = stroke.weight * math.max(pencilP, 0.1) * tiltW / 2.0;
+            alpha = baseAlpha * 0.7 * grain * tiltO;
           case PressureMode.opacity:
-            hw = stroke.weight / 2.0;
-            alpha = baseAlpha * 0.7 * math.max(pencilP, 0.1) * grain;
+            hw = stroke.weight * tiltW / 2.0;
+            alpha = baseAlpha * 0.7 * math.max(pencilP, 0.1) * grain * tiltO;
           case PressureMode.both:
-            hw = stroke.weight * math.max(pencilP, 0.1) / 2.0;
-            alpha = baseAlpha * 0.7 * math.max(pencilP, 0.1) * grain;
+            hw = stroke.weight * math.max(pencilP, 0.1) * tiltW / 2.0;
+            alpha = baseAlpha * 0.7 * math.max(pencilP, 0.1) * grain * tiltO;
         }
 
         spinePoints.add(_SpinePoint(x, y, hw));

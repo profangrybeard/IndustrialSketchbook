@@ -26,6 +26,7 @@ import '../providers/drawing_provider.dart';
 import '../providers/notebook_provider.dart';
 import '../providers/snapshot_provider.dart';
 import '../services/drawing_service.dart';
+import '../utils/perf_metrics.dart';
 import '../utils/stroke_splitter.dart';
 import 'stroke_rendering.dart' show computeSpinePoints;
 import 'active_stroke_painter.dart';
@@ -63,6 +64,15 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     with WidgetsBindingObserver {
   /// Per-tile raster cache for tiled rendering.
   final _tileCache = TileCache(maxTiles: 64);
+
+  /// Notifier for progressive tile rendering continuation.
+  /// The committed strokes painter bumps this to schedule additional paint
+  /// frames when tiles are deferred due to frame budget limits.
+  final _tileContinuation = ValueNotifier<int>(0);
+
+  /// Hash of rendering settings for detecting settings changes that
+  /// require tile cache invalidation (e.g., grain intensity, pressure mode).
+  int? _lastSettingsHash;
 
   /// Whether a stylus/pen is currently active (for palm rejection).
   bool _penActive = false;
@@ -192,6 +202,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     WidgetsBinding.instance.removeObserver(this);
     _snapshotDebounce?.cancel();
     _snapshotImage?.dispose();
+    _tileContinuation.dispose();
     _tileCache.dispose();
     super.dispose();
   }
@@ -234,6 +245,25 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
   Widget build(BuildContext context) {
     final drawingService = ref.watch(drawingServiceProvider);
     final hitRadius = drawingService.currentWeight * 2.0;
+
+    // --- Settings invalidation: clear tile cache when rendering settings change ---
+    // Tiles bake in grain/pressure/mode/tilt at render time. When settings
+    // change (dev menu), cached tiles show stale content. Detect via hash.
+    final settingsHash = Object.hash(
+      drawingService.pressureMode,
+      drawingService.effectiveGrainIntensity,
+      drawingService.effectivePressureExponent,
+      drawingService.replayArcLength,
+      drawingService.tiltStrength,
+    );
+    if (_lastSettingsHash != null && _lastSettingsHash != settingsHash) {
+      _tileCache.clear();
+      // Re-sync cache version with stroke version (clear resets to 0)
+      while (_tileCache.version < drawingService.strokeVersion) {
+        _tileCache.bumpVersion();
+      }
+    }
+    _lastSettingsHash = settingsHash;
 
     // --- Page recall: load persisted strokes + page settings on first build ---
     // The database provider is async (FutureProvider). When it resolves,
@@ -354,6 +384,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                           pressureExponent:
                               drawingService.effectivePressureExponent,
                           replayArcLength: drawingService.replayArcLength,
+                          tiltStrength: drawingService.tiltStrength,
                           tileCache: _tileCache,
                           spatialGrid: drawingService.spatialGrid,
                           devicePixelRatio:
@@ -361,6 +392,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                           viewportRect: renderViewport,
                           zoom: renderZoom,
                           lastMutationInfo: drawingService.lastMutationInfo,
+                          continuationNotifier: _tileContinuation,
                         ),
                         size: Size.infinite,
                       ),
@@ -422,6 +454,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
                             drawingService.effectiveGrainIntensity,
                         pressureExponent:
                             drawingService.effectivePressureExponent,
+                        tiltStrength: drawingService.tiltStrength,
                         liveArcLength: drawingService.liveArcLength,
                         suppressSinglePoint: !_hasStitchPoint,
                       ),
@@ -1390,6 +1423,7 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     // Freeze renderCamera — tiles won't be re-rendered during pinch.
     // A compensating Transform handles the visual scaling/panning.
     _renderCamera = _camera.copy();
+    PerfMetrics.instance.resetPinchStats();
   }
 
   /// Update zoom/pan during an active pinch gesture.
@@ -1412,6 +1446,8 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
     // The world point under the original focal must stay under the current focal.
     final focalWorld = _baseCameraSnapshot!.screenToWorld(_baseFocal);
 
+    PerfMetrics.instance.pinchFrameCount++;
+
     setState(() {
       _camera.zoom = newZoom;
       _camera.topLeft = Offset(
@@ -1422,15 +1458,46 @@ class _CanvasWidgetState extends ConsumerState<CanvasWidget>
   }
 
   /// End the pinch gesture. No clamping — infinite pan.
+  ///
+  /// Key optimization: if zoom didn't change (pure pan), skip the expensive
+  /// tile cache clear. Existing tiles serve the new viewport position via
+  /// cache hits — zero re-renders needed.
   void _endPinch() {
     _basePinchDistance = null;
     _baseCameraSnapshot = null;
     if (_isPinching) {
       _isPinching = false;
-      // Sync renderCamera to current camera. This triggers tile re-render
-      // at the new zoom resolution on the next paint.
+      final perf = PerfMetrics.instance;
+      perf.pinchDurationMs =
+          (DateTime.now().microsecondsSinceEpoch - perf.pinchStartUs) ~/ 1000;
+
+      final dpr = MediaQuery.of(context).devicePixelRatio;
+      final oldPixelSize =
+          TileCache.tilePixelSize(_renderCamera.zoom, dpr);
+      final newPixelSize = TileCache.tilePixelSize(_camera.zoom, dpr);
+      final zoomChanged =
+          (oldPixelSize - newPixelSize).abs() > TileCache.resolutionTolerance;
+
+      perf.pinchZoomChanged = zoomChanged;
+
+      // Sync renderCamera to current camera for the next paint.
       _renderCamera = _camera.copy();
-      _tileCache.clear(); // Force full re-render at new resolution
+
+      // Progressive rendering: don't clear on zoom change.
+      // Old-resolution tiles stay in cache as stretched placeholders
+      // (getAny() returns them). get() misses on resolution mismatch,
+      // triggering progressive re-render at new pixel size — 1-2 tiles
+      // per frame instead of all at once.
+      // Pure pan (no zoom change): tiles stay cached, painter blits at new
+      // viewport offsets. Zero tile re-renders needed.
+
+      perf.pinchEndPending = true;
+
+      debugPrint('[Pinch] ended: ${perf.pinchFrameCount}frm '
+          '${perf.pinchDurationMs}ms '
+          'zoom ${_renderCamera.zoom.toStringAsFixed(3)} '
+          '${zoomChanged ? "CHANGED" : "same"} '
+          'tiles=${_tileCache.tileCount}');
     }
   }
 
