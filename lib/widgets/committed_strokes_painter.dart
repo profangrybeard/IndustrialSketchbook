@@ -1,6 +1,8 @@
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 import '../models/pressure_mode.dart';
 import '../models/stroke.dart';
@@ -20,6 +22,12 @@ import 'stroke_rendering.dart' as rendering;
 /// (512×512 world units) and caches them in a [TileCache] with LRU eviction.
 /// Only tiles visible in the current viewport are rendered/blitted.
 ///
+/// **Progressive rendering**: renders at most a few tiles per frame to avoid
+/// blocking the UI thread. Cache misses beyond the frame budget are deferred
+/// to subsequent frames via [continuationNotifier]. Old-resolution tiles
+/// (from [TileCache.getAny]) are stretched as placeholders until the new
+/// version renders.
+///
 /// This painter lives **outside** the Flutter [Transform] widget — it handles
 /// its own world→screen mapping via [viewportRect] and [zoom].
 class CommittedStrokesPainter extends CustomPainter {
@@ -38,7 +46,9 @@ class CommittedStrokesPainter extends CustomPainter {
     required this.viewportRect,
     required this.zoom,
     required this.lastMutationInfo,
-  });
+    ValueNotifier<int>? continuationNotifier,
+  })  : _continuationNotifier = continuationNotifier,
+        super(repaint: continuationNotifier);
 
   /// All committed strokes for the current page.
   final List<Stroke> committedStrokes;
@@ -82,9 +92,21 @@ class CommittedStrokesPainter extends CustomPainter {
   /// Describes the most recent mutation for cache update path selection.
   final MutationInfo lastMutationInfo;
 
+  /// Optional notifier for triggering continuation paints.
+  /// When non-null, enables progressive rendering: tiles beyond the frame
+  /// budget are deferred and this notifier is bumped to schedule the next
+  /// paint frame. When null, all tiles render synchronously (legacy behavior).
+  final ValueNotifier<int>? _continuationNotifier;
+
+  /// Time budget in microseconds for tile rendering per frame.
+  /// Always renders at least one tile to ensure progress, then checks budget.
+  /// At ~30ms/tile, this typically yields 1 tile per frame.
+  static const int _frameBudgetUs = 8000; // 8ms
+
   @override
   void paint(Canvas canvas, Size size) {
     final perf = PerfMetrics.instance;
+    perf.resetTileStats();
     final sw = Stopwatch()..start();
 
     // Safety net: if strokeVersion changed, ensure stale tiles are purged.
@@ -107,26 +129,21 @@ class CommittedStrokesPainter extends CustomPainter {
     final rowMin = (viewportRect.top / tileSize).floor();
     final rowMax = (viewportRect.bottom / tileSize).floor();
 
-    int tilesRendered = 0;
-    int tilesHit = 0;
+    perf.tileVisibleCount = (colMax - colMin + 1) * (rowMax - rowMin + 1);
+    final blitPaint = Paint()..filterQuality = FilterQuality.low;
+
+    // Progressive upgrade strategy (Google Maps style):
+    // - Tiles with NO cached version: render synchronously (never blank)
+    // - Tiles with old-resolution version: show stretched, upgrade with budget
+    // This guarantees every tile shows SOMETHING on every frame.
+    int tilesDeferred = 0;
+    int upgradesThisFrame = 0;
 
     for (int r = rowMin; r <= rowMax; r++) {
       for (int c = colMin; c <= colMax; c++) {
         final key = TileKey(c, r);
         final tileWorld = key.worldRect(tileSize);
 
-        // Try exact cache hit (version + resolution match)
-        var img = tileCache.get(key, pixelSize);
-        if (img != null) {
-          tilesHit++;
-        } else {
-          // Render fresh tile
-          img = _renderTile(key, tileWorld, pixelSize);
-          tileCache.put(key, img, pixelSize);
-          tilesRendered++;
-        }
-
-        // Blit tile to screen position
         final screenRect = Rect.fromLTWH(
           (tileWorld.left - viewportRect.left) * zoom,
           (tileWorld.top - viewportRect.top) * zoom,
@@ -134,31 +151,112 @@ class CommittedStrokesPainter extends CustomPainter {
           tileSize * zoom,
         );
 
-        canvas.drawImageRect(
-          img,
-          Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble()),
-          screenRect,
-          Paint()..filterQuality = FilterQuality.low,
-        );
+        // 1) Exact cache hit (version + resolution match) — blit immediately
+        var img = tileCache.get(key, pixelSize);
+        if (img != null) {
+          final blitSw = Stopwatch()..start();
+          canvas.drawImageRect(
+            img,
+            Rect.fromLTWH(
+                0, 0, img.width.toDouble(), img.height.toDouble()),
+            screenRect,
+            blitPaint,
+          );
+          blitSw.stop();
+          perf.tileBlitUs += blitSw.elapsedMicroseconds;
+          continue;
+        }
+
+        // 2) Cache miss — check for old-resolution fallback (e.g., post-zoom)
+        final fallback = (_continuationNotifier != null)
+            ? tileCache.getAny(key)
+            : null;
+
+        if (fallback != null) {
+          // Has old-resolution tile. Upgrade with frame budget:
+          // always upgrade at least 1 per frame (guaranteed progress),
+          // then check budget for additional upgrades.
+          if (upgradesThisFrame == 0 ||
+              sw.elapsedMicroseconds <= _frameBudgetUs) {
+            // Within budget — render at new resolution
+            upgradesThisFrame++;
+            final tileSw = Stopwatch()..start();
+            img = _renderTile(key, tileWorld, pixelSize);
+            tileSw.stop();
+            tileCache.put(key, img, pixelSize);
+            final tileUs = tileSw.elapsedMicroseconds;
+            perf.tileRenderTotalUs += tileUs;
+            if (tileUs > perf.tileRenderMaxUs) perf.tileRenderMaxUs = tileUs;
+            perf.tileRenderCount++;
+
+            canvas.drawImageRect(
+              img,
+              Rect.fromLTWH(
+                  0, 0, img.width.toDouble(), img.height.toDouble()),
+              screenRect,
+              blitPaint,
+            );
+          } else {
+            // Over budget — show stretched old-resolution placeholder
+            canvas.drawImageRect(
+              fallback,
+              Rect.fromLTWH(0, 0, fallback.width.toDouble(),
+                  fallback.height.toDouble()),
+              screenRect,
+              blitPaint,
+            );
+            tilesDeferred++;
+          }
+        } else {
+          // 3) No fallback — render synchronously (never show blank tiles)
+          final tileSw = Stopwatch()..start();
+          img = _renderTile(key, tileWorld, pixelSize);
+          tileSw.stop();
+          tileCache.put(key, img, pixelSize);
+          final tileUs = tileSw.elapsedMicroseconds;
+          perf.tileRenderTotalUs += tileUs;
+          if (tileUs > perf.tileRenderMaxUs) perf.tileRenderMaxUs = tileUs;
+          perf.tileRenderCount++;
+
+          canvas.drawImageRect(
+            img,
+            Rect.fromLTWH(
+                0, 0, img.width.toDouble(), img.height.toDouble()),
+            screenRect,
+            blitPaint,
+          );
+        }
       }
     }
 
-    sw.stop();
-    perf.committedPaintUs = sw.elapsedMicroseconds;
-    perf.committedPaintType =
-        tilesRendered > 0 ? 'tile:$tilesRendered/$tilesHit' : 'hit';
+    // Schedule continuation frame for deferred upgrades
+    if (tilesDeferred > 0 && _continuationNotifier != null) {
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        _continuationNotifier!.value++;
+      });
+    }
 
-    // Debug: log first paint after strokes load to diagnose disappearing
-    // strokes. Only logs when tiles were freshly rendered (not cache hits).
-    if (tilesRendered > 0) {
-      debugPrint('[CommittedPainter] paint: ${tilesRendered + tilesHit} tiles '
-          '(${tilesRendered} rendered, $tilesHit cached), '
-          '${committedStrokes.length} strokes, '
-          'version=$strokeVersion, '
-          'viewport=$viewportRect, zoom=$zoom, '
-          'pixelSize=$pixelSize, '
-          'spatialGrid=${spatialGrid != null ? "yes(${spatialGrid!.strokeCount})" : "null"}, '
-          '${sw.elapsedMicroseconds}µs');
+    sw.stop();
+    final totalUs = sw.elapsedMicroseconds;
+    perf.recordCommittedPaint(totalUs);
+    perf.committedPaintType = tilesDeferred > 0
+        ? '${perf.tileRenderCount}r/${perf.tileCacheHits}h/${tilesDeferred}d/${perf.tileVisibleCount}v'
+        : '${perf.tileRenderCount}r/${perf.tileCacheHits}h/${perf.tileVisibleCount}v';
+
+    // Post-pinch detection: record the first paint after pinch end
+    if (perf.pinchEndPending) {
+      perf.postPinchPaintUs = totalUs;
+      perf.postPinchTilesRendered = perf.tileRenderCount;
+      perf.pinchEndPending = false;
+    }
+
+    // Log when tiles were freshly rendered or deferred (not all cache hits)
+    if (perf.tileRenderCount > 0 || tilesDeferred > 0) {
+      debugPrint('[CommittedPainter] ${perf.committedPaintType} '
+          '${committedStrokes.length}str v=$strokeVersion '
+          'render=${perf.tileRenderTotalUs}µs(max ${perf.tileRenderMaxUs}µs) '
+          'blit=${perf.tileBlitUs}µs total=${totalUs}µs '
+          'miss:absent=${perf.tileMissAbsent}/ver=${perf.tileMissVersion}/res=${perf.tileMissResolution}');
     }
   }
 
@@ -215,6 +313,14 @@ class CommittedStrokesPainter extends CustomPainter {
     recCanvas.save();
     recCanvas.clipRect(tileWorld);
 
+    // Zoom-adaptive arc length: at higher zoom, use finer subdivisions
+    // so curves stay smooth. At zoom 1x, use replayArcLength (1.5).
+    // At zoom 3x, use replayArcLength/3 (0.5). Clamped to avoid
+    // excessive subdivision at extreme zoom.
+    final effectiveArcLength = zoom > 1.0
+        ? math.max(replayArcLength / zoom, 0.3)
+        : replayArcLength;
+
     int strokesRendered = 0;
     for (final stroke in committedStrokes) {
       if (!candidateIds.contains(stroke.id)) continue;
@@ -229,7 +335,7 @@ class CommittedStrokesPainter extends CustomPainter {
         grainIntensity: grainIntensity,
         pressureExponent: pressureExponent,
         tiltStrength: tiltStrength,
-        targetArcLength: replayArcLength,
+        targetArcLength: effectiveArcLength,
       );
     }
 

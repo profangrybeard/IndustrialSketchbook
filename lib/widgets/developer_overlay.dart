@@ -73,7 +73,21 @@ class _DeveloperOverlayState extends State<DeveloperOverlay> {
     final activeMs = (perf.activeStrokePaintAvgUs / 1000).toStringAsFixed(1);
     final activeMaxMs = (perf.activeStrokePaintMaxUs / 1000).toStringAsFixed(1);
     final fps = perf.estimatedFps > 0 ? perf.estimatedFps.toStringAsFixed(0) : '-';
-    final committedMs = (perf.committedPaintUs / 1000).toStringAsFixed(1);
+    final commitAvgMs = (perf.committedPaintAvgUs / 1000).toStringAsFixed(1);
+    final commitMaxMs = (perf.committedPaintMaxUs / 1000).toStringAsFixed(1);
+
+    // Tile metrics
+    final tileRenderMs = (perf.tileRenderTotalUs / 1000).toStringAsFixed(1);
+    final tileMaxMs = (perf.tileRenderMaxUs / 1000).toStringAsFixed(1);
+    final blitMs = (perf.tileBlitUs / 1000).toStringAsFixed(1);
+
+    // Pinch metrics
+    final pinchStr = perf.postPinchPaintUs > 0
+        ? 'post-pinch: ${(perf.postPinchPaintUs / 1000).toStringAsFixed(1)}ms '
+          '${perf.postPinchTilesRendered}t '
+          '${perf.pinchZoomChanged ? "zoom" : "pan"} '
+          '${perf.pinchFrameCount}frm'
+        : '';
 
     return Positioned(
       left: _x,
@@ -99,7 +113,10 @@ class _DeveloperOverlayState extends State<DeveloperOverlay> {
             '$memoryStr\n'
             'active: ${activeMs}ms avg / ${activeMaxMs}ms max \u00b7 ~${fps}fps\n'
             'inflight: ${perf.inflightPointCount}pts \u2192 ${_formatNumber(perf.inflightSpinePointCount)}sp \u00b7 ${perf.inflightSaveLayerCount}lyr\n'
-            'commit: ${committedMs}ms [${perf.committedPaintType}] \u00b7 ${perf.committedStrokeCount}str',
+            'commit: ${commitAvgMs}ms avg / ${commitMaxMs}ms max [${perf.committedPaintType}]\n'
+            'tiles: render=${tileRenderMs}ms(max ${tileMaxMs}ms) blit=${blitMs}ms '
+            'miss:${perf.tileMissAbsent}a/${perf.tileMissVersion}v/${perf.tileMissResolution}r'
+            '${pinchStr.isNotEmpty ? "\n$pinchStr" : ""}',
             style: TextStyle(
               color: Colors.white.withValues(alpha: 0.7),
               fontSize: 10,

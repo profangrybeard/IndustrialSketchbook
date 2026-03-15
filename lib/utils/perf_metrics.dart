@@ -75,6 +75,120 @@ class PerfMetrics {
   /// Total saveLayer calls in the last committed paint.
   int committedSaveLayerCount = 0;
 
+  /// Rolling window of recent committed paint times for averaging.
+  final _committedPaintTimes = Queue<int>();
+
+  void recordCommittedPaint(int microseconds) {
+    committedPaintUs = microseconds;
+    _committedPaintTimes.addLast(microseconds);
+    while (_committedPaintTimes.length > _windowSize) {
+      _committedPaintTimes.removeFirst();
+    }
+  }
+
+  /// Average committed paint time over the rolling window.
+  double get committedPaintAvgUs {
+    if (_committedPaintTimes.isEmpty) return 0;
+    int sum = 0;
+    for (final t in _committedPaintTimes) {
+      sum += t;
+    }
+    return sum / _committedPaintTimes.length;
+  }
+
+  /// Max committed paint time in the rolling window.
+  int get committedPaintMaxUs {
+    if (_committedPaintTimes.isEmpty) return 0;
+    int max = 0;
+    for (final t in _committedPaintTimes) {
+      if (t > max) max = t;
+    }
+    return max;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Tile cache stats (per paint call)
+  // ---------------------------------------------------------------------------
+
+  /// Tiles served from cache this paint.
+  int tileCacheHits = 0;
+
+  /// Tiles that missed cache this paint.
+  int tileCacheMisses = 0;
+
+  /// Miss reason: tile not in cache at all.
+  int tileMissAbsent = 0;
+
+  /// Miss reason: stale version.
+  int tileMissVersion = 0;
+
+  /// Miss reason: wrong pixel resolution.
+  int tileMissResolution = 0;
+
+  /// Total time rendering all missed tiles this paint (µs).
+  int tileRenderTotalUs = 0;
+
+  /// Slowest single tile render this paint (µs).
+  int tileRenderMaxUs = 0;
+
+  /// Number of tiles rendered (not cached) this paint.
+  int tileRenderCount = 0;
+
+  /// Time spent blitting tiles to canvas this paint (µs).
+  int tileBlitUs = 0;
+
+  /// Total visible tiles in viewport this paint.
+  int tileVisibleCount = 0;
+
+  /// Reset per-paint tile stats (call at start of each paint).
+  void resetTileStats() {
+    tileCacheHits = 0;
+    tileCacheMisses = 0;
+    tileMissAbsent = 0;
+    tileMissVersion = 0;
+    tileMissResolution = 0;
+    tileRenderTotalUs = 0;
+    tileRenderMaxUs = 0;
+    tileRenderCount = 0;
+    tileBlitUs = 0;
+    tileVisibleCount = 0;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pinch gesture timing
+  // ---------------------------------------------------------------------------
+
+  /// Frames rendered during the current/last pinch gesture.
+  int pinchFrameCount = 0;
+
+  /// Total pinch gesture duration (ms).
+  int pinchDurationMs = 0;
+
+  /// Timestamp (µs) when current pinch started.
+  int pinchStartUs = 0;
+
+  /// Time of the first committed paint after pinch end (µs).
+  int postPinchPaintUs = 0;
+
+  /// Tiles rendered in the first paint after pinch end.
+  int postPinchTilesRendered = 0;
+
+  /// Flag: set true by _endPinch(), cleared after first committed paint.
+  bool pinchEndPending = false;
+
+  /// Whether zoom changed during the last pinch (vs pure pan).
+  bool pinchZoomChanged = false;
+
+  void resetPinchStats() {
+    pinchFrameCount = 0;
+    pinchDurationMs = 0;
+    pinchStartUs = DateTime.now().microsecondsSinceEpoch;
+    postPinchPaintUs = 0;
+    postPinchTilesRendered = 0;
+    pinchEndPending = false;
+    pinchZoomChanged = false;
+  }
+
   // ---------------------------------------------------------------------------
   // Per-stroke rendering stats (updated by renderStroke)
   // ---------------------------------------------------------------------------
